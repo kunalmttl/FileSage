@@ -23,6 +23,7 @@ import type { ExtractionProgress } from "@/features/extraction/extract-pipeline"
 import { embedChunks } from "@/features/embeddings/embed-pipeline";
 import type { EmbedProgress } from "@/features/embeddings/embed-pipeline";
 import type { ScanProgress } from "@/features/indexing/scanner";
+import { classifyScannedFiles } from "@/features/indexing/scan-classifier";
 import {
   scanDirectoryHandleVault,
   scanUploadedFolderVault,
@@ -32,7 +33,9 @@ import {
   clearFilesForVault,
   clearLexicalIndexForVault,
   clearVectorsForVault,
+  deleteFileAndDependents,
   deleteVault,
+  listChunksForFile,
   listChunksForVault,
   listVaults,
   saveFileBatch,
@@ -54,6 +57,8 @@ import { Separator } from "@/components/ui/separator";
 type ConnectorStatus =
   | "idle"
   | "scanning"
+  | "classifying"
+  | "cleaning"
   | "extracting"
   | "embedding"
   | "complete"
@@ -68,6 +73,20 @@ const EMPTY_EXTRACTION: ExtractionProgress = {
 };
 const EMPTY_EMBED: EmbedProgress = { processed: 0, total: 0, stage: "loading" };
 
+type ClassificationSummary = {
+  new: number;
+  changed: number;
+  unchanged: number;
+  deleted: number;
+};
+
+const EMPTY_CLASSIFICATION: ClassificationSummary = {
+  new: 0,
+  changed: 0,
+  unchanged: 0,
+  deleted: 0,
+};
+
 export function VaultConnector() {
   const fallbackInputRef = useRef<HTMLInputElement>(null);
   const [directoryPickerSupported, setDirectoryPickerSupported] = useState(false);
@@ -77,6 +96,8 @@ export function VaultConnector() {
   const [extractionProgress, setExtractionProgress] =
     useState<ExtractionProgress>(EMPTY_EXTRACTION);
   const [embedProgress, setEmbedProgress] = useState<EmbedProgress>(EMPTY_EMBED);
+  const [classification, setClassification] =
+    useState<ClassificationSummary>(EMPTY_CLASSIFICATION);
   const [message, setMessage] = useState("No vault connected yet.");
   const [error, setError] = useState<string | undefined>();
   const [isPending, startTransition] = useTransition();
@@ -117,11 +138,13 @@ export function VaultConnector() {
     });
   }
 
-  async function runEmbedding(vaultId: string, vaultName: string) {
+  async function runEmbedding(vaultId: string, vaultName: string, fileIds?: string[]) {
     setStatus("embedding");
     setEmbedProgress(EMPTY_EMBED);
     setMessage(`Embedding chunks for ${vaultName}.`);
-    const chunks = await listChunksForVault(vaultId);
+    const chunks = fileIds
+      ? (await Promise.all(fileIds.map((fileId) => listChunksForFile(fileId)))).flat()
+      : await listChunksForVault(vaultId);
     if (chunks.length === 0) return { embedded: 0, failed: 0 };
     return embedChunks(chunks, {
       onProgress: (p) => {
@@ -137,6 +160,7 @@ export function VaultConnector() {
     setScanProgress(EMPTY_SCAN);
     setExtractionProgress(EMPTY_EXTRACTION);
     setEmbedProgress(EMPTY_EMBED);
+    setClassification(EMPTY_CLASSIFICATION);
     setMessage("Waiting for folder selection.");
     try {
       const picked = await pickDirectoryVault();
@@ -164,7 +188,7 @@ export function VaultConnector() {
       });
       await updateVaultScanStats(vault.id, result.stats);
       const extraction = await runExtraction(scannedFiles, vault.name);
-      const embed = await runEmbedding(vault.id, vault.name);
+      const embed = await runEmbedding(vault.id, vault.name, scannedFiles.map((file) => file.id));
       await refreshVaults();
       setStatus("complete");
       setMessage(
@@ -188,6 +212,7 @@ export function VaultConnector() {
     setScanProgress(EMPTY_SCAN);
     setExtractionProgress(EMPTY_EXTRACTION);
     setEmbedProgress(EMPTY_EMBED);
+    setClassification(EMPTY_CLASSIFICATION);
     try {
       const vault = createUploadFallbackVault(fileList);
       await saveVault(vault);
@@ -204,7 +229,7 @@ export function VaultConnector() {
       });
       await updateVaultScanStats(vault.id, result.stats);
       const extraction = await runExtraction(result.files, vault.name);
-      const embed = await runEmbedding(vault.id, vault.name);
+      const embed = await runEmbedding(vault.id, vault.name, result.files.map((file) => file.id));
       await refreshVaults();
       setStatus("complete");
       setMessage(
@@ -235,6 +260,7 @@ export function VaultConnector() {
     setScanProgress(EMPTY_SCAN);
     setExtractionProgress(EMPTY_EXTRACTION);
     setEmbedProgress(EMPTY_EMBED);
+    setClassification(EMPTY_CLASSIFICATION);
     try {
       const perm = await requestDirectoryReadPermission(vault.handle);
       if (perm !== "granted") {
@@ -246,25 +272,53 @@ export function VaultConnector() {
       }
       const v = { ...vault, permissionState: perm };
       await saveVault(v);
-      await Promise.all([
-        clearFilesForVault(v.id),
-        clearChunksForVault(v.id),
-        clearVectorsForVault(v.id),
-        clearLexicalIndexForVault(v.id),
-      ]);
       setMessage(`Rescanning ${v.name}.`);
-      const scannedFiles: FileEntryRecord[] = [];
       const result = await scanDirectoryHandleVault(v, {
         onProgress: setScanProgress,
-        onBatch: async (batch) => { scannedFiles.push(...batch); await saveFileBatch(batch); },
       });
+
+      setStatus("classifying");
+      setMessage(`Classifying changes in ${v.name}.`);
+      const { classified, deletedRecords } = await classifyScannedFiles(v.id, result.files);
+      const newFiles = classified.filter((file) => file.changeStatus === "new");
+      const changedFiles = classified.filter((file) => file.changeStatus === "changed");
+      const unchangedFiles = classified.filter((file) => file.changeStatus === "unchanged");
+      const summary = {
+        new: newFiles.length,
+        changed: changedFiles.length,
+        unchanged: unchangedFiles.length,
+        deleted: deletedRecords.length,
+      };
+      setClassification(summary);
+
+      const recordsToDelete = [
+        ...deletedRecords,
+        ...changedFiles.flatMap((file) => file.existingRecord ? [file.existingRecord] : []),
+      ];
+      if (recordsToDelete.length > 0) {
+        setStatus("cleaning");
+        setMessage(`Cleaning ${recordsToDelete.length.toLocaleString()} changed or deleted files.`);
+        await Promise.all(recordsToDelete.map((record) => deleteFileAndDependents(record)));
+      }
+
       await updateVaultScanStats(v.id, result.stats);
-      const extraction = await runExtraction(scannedFiles, v.name);
-      const embed = await runEmbedding(v.id, v.name);
+      const filesToProcess = [...newFiles, ...changedFiles].map((file) => file.scannedFile);
+      if (filesToProcess.length === 0) {
+        await refreshVaults();
+        setStatus("complete");
+        setMessage(
+          `Done. ${unchangedFiles.length.toLocaleString()} files unchanged, nothing to re-index.`
+        );
+        return;
+      }
+
+      await saveFileBatch(filesToProcess);
+      const extraction = await runExtraction(filesToProcess, v.name);
+      const embed = await runEmbedding(v.id, v.name, filesToProcess.map((file) => file.id));
       await refreshVaults();
       setStatus("complete");
       setMessage(
-        `Done. ${result.stats.fileCount.toLocaleString()} files rescanned, ${extraction.extracted} extracted, ${embed.embedded} chunks embedded.`
+        `Done. ${filesToProcess.length.toLocaleString()} changed files indexed, ${unchangedFiles.length.toLocaleString()} skipped, ${extraction.extracted} extracted, ${embed.embedded} chunks embedded.`
       );
     } catch (err) {
       setStatus("error");
@@ -272,7 +326,7 @@ export function VaultConnector() {
     }
   }
 
-  const busy = ["scanning", "extracting", "embedding"].includes(status) || isPending;
+  const busy = ["scanning", "classifying", "cleaning", "extracting", "embedding"].includes(status) || isPending;
 
   return (
     <section className="grid gap-5 lg:grid-cols-[1fr_380px]">
@@ -322,12 +376,26 @@ export function VaultConnector() {
               label="Status"
               value={
                 status === "scanning" ? "Scanning…"
+                  : status === "classifying" ? "Classifying…"
+                  : status === "cleaning" ? "Cleaning…"
                   : status === "extracting" ? "Extracting…"
                   : status === "embedding" ? "Embedding…"
                   : statusLabel(status)
               }
             />
           </div>
+
+          {(classification.new > 0 ||
+            classification.changed > 0 ||
+            classification.unchanged > 0 ||
+            classification.deleted > 0) && (
+            <div className="grid gap-3 sm:grid-cols-4">
+              <Metric label="Unchanged" value={classification.unchanged.toLocaleString()} />
+              <Metric label="New" value={classification.new.toLocaleString()} />
+              <Metric label="Changed" value={classification.changed.toLocaleString()} />
+              <Metric label="Deleted" value={classification.deleted.toLocaleString()} />
+            </div>
+          )}
 
           {/* Extraction metrics */}
           {(status === "extracting" || status === "embedding" || extractionProgress.processed > 0) && (

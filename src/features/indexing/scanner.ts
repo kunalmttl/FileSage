@@ -1,4 +1,5 @@
 import { getWebkitRelativePath } from "@/features/file-access/picker";
+import { computeFingerprint } from "@/features/indexing/fingerprint";
 import type { FileEntryRecord, VaultRecord, VaultScanStats } from "@/lib/db/types";
 import { recordPipelineTiming } from "@/lib/performance/metrics";
 
@@ -183,6 +184,7 @@ function createFileEntryRecord({
     lastModified: file.lastModified,
     extension: getExtension(file.name),
     source: vault.source,
+    fingerprint: computeFingerprint(relativePath, file.size, file.lastModified),
     handle,
   };
 }

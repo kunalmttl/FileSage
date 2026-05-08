@@ -13,12 +13,11 @@
 
 import {
   getChunkStats,
+  getChunksByIds,
   getPostingsForTerms,
   getTermStats,
   getVaultStat,
-  listAllChunks,
   listAllFiles,
-  listChunksForVault,
   listFilesForVault,
   listVaults,
 } from "@/lib/db/filesage-db";
@@ -55,6 +54,7 @@ export type SearchOptions = {
 const MAX_SNIPPETS_PER_FILE = 2;
 const TOP_K = 20;
 const CANDIDATE_LIMIT = 150;
+const SNIPPET_CHUNK_LOAD_LIMIT = 30;
 
 export async function search(
   query: string,
@@ -215,13 +215,12 @@ export async function search(
   if (chunks) {
     for (const c of chunks) chunkTextMap.set(c.id, c);
   } else {
-    if (!vaultId) {
-      const allChunks = await listAllChunks();
-      for (const c of allChunks) chunkTextMap.set(c.id, c);
-    } else {
-      const vaultChunks = await listChunksForVault(vaultId);
-      for (const c of vaultChunks) chunkTextMap.set(c.id, c);
-    }
+    const snippetChunkIds = Array.from(new Set(fused.map((hit) => hit.chunkId))).slice(
+      0,
+      SNIPPET_CHUNK_LOAD_LIMIT
+    );
+    const snippetChunks = await getChunksByIds(snippetChunkIds);
+    for (const c of snippetChunks) chunkTextMap.set(c.id, c);
   }
   counts.loadedChunks = chunkTextMap.size;
   mark("loadChunks");

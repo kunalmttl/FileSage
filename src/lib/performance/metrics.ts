@@ -18,8 +18,8 @@ const BUDGETS: Record<string, number> = {
   'idb-write:vectors': 300,
   'idb-write:postings': 500,
   'idb-write:files': 300,
-  'embedding:batch': 2000,
-  'extraction:pdf': 500,
+  'embedding:batch': 15000,
+  'extraction:pdf': 2000,
   'extraction:text': 200,
   'scan:total': 10000,
 };

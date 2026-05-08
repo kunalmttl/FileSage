@@ -25,6 +25,9 @@ export type FileEntryRecord = {
   extension: string;
   source: VaultSource;
   extractionStatus?: ExtractionStatus;
+  fingerprint: string;
+  indexedAt?: number;
+  contentHash?: string;
   handle?: FileSystemFileHandle;
 };
 
@@ -81,10 +84,10 @@ export type VectorRecord = {
 };
 
 // ---------------------------------------------------------------------------
-// Lexical index types (DB v4)
+// Lexical index types (DB v6)
 // ---------------------------------------------------------------------------
 
-/** One record per (vaultId, term, chunkId). */
+/** In-memory posting used by BM25 scoring. */
 export type PostingRecord = {
   /** `{vaultId}:{term}:{chunkId}` */
   id: string;
@@ -94,6 +97,17 @@ export type PostingRecord = {
   fileId: string;
   /** Raw term frequency in this chunk. */
   tf: number;
+};
+
+/** One durable record per (vaultId, term). */
+export type PostingListRecord = {
+  vaultId: string;
+  term: string;
+  list: Array<{
+    chunkId: string;
+    fileId: string;
+    tf: number;
+  }>;
 };
 
 /** One record per (vaultId, term). */

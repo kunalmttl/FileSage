@@ -4,6 +4,7 @@ import type {
   FileEntryRecord,
   FileMetadataQuery,
   FileTypeSummary,
+  PostingListRecord,
   PostingRecord,
   TermStatRecord,
   VaultFileStats,
@@ -15,7 +16,7 @@ import type {
 import { recordPipelineTiming } from "@/lib/performance/metrics";
 
 const DB_NAME = "filesage";
-const DB_VERSION = 5;
+const DB_VERSION = 7;
 const VAULT_STORE = "vaults";
 const FILE_STORE = "files";
 const CHUNK_STORE = "chunks";
@@ -42,14 +43,37 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
+function writeTransaction(
+  db: IDBDatabase,
+  storeNames: string | string[]
+): IDBTransaction {
+  return db.transaction(storeNames, "readwrite", { durability: "relaxed" });
+}
+
+function commitTransaction(transaction: IDBTransaction): void {
+  transaction.commit?.();
+}
+
+function ensureIndex(
+  store: IDBObjectStore,
+  name: string,
+  keyPath: string | string[],
+  options?: IDBIndexParameters
+): void {
+  if (!store.indexNames.contains(name)) {
+    store.createIndex(name, keyPath, options);
+  }
+}
+
 function openFilesageDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
 
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
+      const oldVersion = event.oldVersion;
 
       if (!db.objectStoreNames.contains(VAULT_STORE)) {
         const vaults = db.createObjectStore(VAULT_STORE, { keyPath: "id" });
@@ -97,6 +121,46 @@ function openFilesageDb(): Promise<IDBDatabase> {
 
       if (!db.objectStoreNames.contains(VAULT_STAT_STORE)) {
         db.createObjectStore(VAULT_STAT_STORE, { keyPath: "id" });
+      }
+
+      if (oldVersion < 6) {
+        if (db.objectStoreNames.contains(POSTING_STORE)) {
+          db.deleteObjectStore(POSTING_STORE);
+        }
+        const postings = db.createObjectStore(POSTING_STORE, {
+          keyPath: ["vaultId", "term"],
+        });
+        postings.createIndex("vaultId", "vaultId", { unique: false });
+      }
+
+      if (oldVersion < 7) {
+        const tx = request.transaction;
+        if (!tx) return;
+
+        if (db.objectStoreNames.contains(FILE_STORE)) {
+          const files = tx.objectStore(FILE_STORE);
+          ensureIndex(files, "by_vault_path", ["vaultId", "relativePath"], {
+            unique: true,
+          });
+        }
+
+        if (db.objectStoreNames.contains(CHUNK_STORE)) {
+          ensureIndex(tx.objectStore(CHUNK_STORE), "by_file", "fileId", {
+            unique: false,
+          });
+        }
+
+        if (db.objectStoreNames.contains(VECTOR_STORE)) {
+          ensureIndex(tx.objectStore(VECTOR_STORE), "by_file", "fileId", {
+            unique: false,
+          });
+        }
+
+        if (db.objectStoreNames.contains(CHUNK_STAT_STORE)) {
+          ensureIndex(tx.objectStore(CHUNK_STAT_STORE), "by_file", "fileId", {
+            unique: false,
+          });
+        }
       }
     };
 
@@ -184,13 +248,174 @@ export async function clearFilesForVault(vaultId: string): Promise<void> {
   await transactionDone(tx);
 }
 
+async function deleteRecordsByIndex(
+  storeName: string,
+  indexName: string,
+  key: IDBValidKey
+): Promise<void> {
+  const db = await openFilesageDb();
+  const tx = writeTransaction(db, storeName);
+  const req = tx.objectStore(storeName).index(indexName).openCursor(IDBKeyRange.only(key));
+
+  await new Promise<void>((resolve, reject) => {
+    req.onsuccess = () => {
+      try {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        cursor.delete();
+        cursor.continue();
+      } catch (error) {
+        tx.abort();
+        reject(error);
+      }
+    };
+    req.onerror = () => reject(req.error);
+  });
+
+  await transactionDone(tx);
+}
+
+async function listChunkStatsForFile(fileId: string): Promise<ChunkStatRecord[]> {
+  const db = await openFilesageDb();
+  const tx = db.transaction(CHUNK_STAT_STORE, "readonly");
+  const stats = await requestToPromise<ChunkStatRecord[]>(
+    tx.objectStore(CHUNK_STAT_STORE).index("by_file").getAll(IDBKeyRange.only(fileId))
+  );
+  await transactionDone(tx);
+  return stats;
+}
+
+async function prunePostingsForFile(vaultId: string, fileId: string): Promise<Map<string, number>> {
+  const db = await openFilesageDb();
+  const readTx = db.transaction(POSTING_STORE, "readonly");
+  const records = await requestToPromise<PostingListRecord[]>(
+    readTx.objectStore(POSTING_STORE).index("vaultId").getAll(IDBKeyRange.only(vaultId))
+  );
+  await transactionDone(readTx);
+
+  const updates: PostingListRecord[] = [];
+  const deletes: Array<[string, string]> = [];
+  const termDeltas = new Map<string, number>();
+
+  for (const record of records) {
+    const nextList = record.list.filter((posting) => posting.fileId !== fileId);
+    const removed = record.list.length - nextList.length;
+    if (removed === 0) continue;
+    termDeltas.set(record.term, removed);
+    if (nextList.length === 0) {
+      deletes.push([record.vaultId, record.term]);
+    } else {
+      updates.push({ ...record, list: nextList });
+    }
+  }
+
+  const batchSize = 200;
+  for (let i = 0; i < updates.length || i < deletes.length; i += batchSize) {
+    const tx = writeTransaction(db, POSTING_STORE);
+    const store = tx.objectStore(POSTING_STORE);
+    for (const record of updates.slice(i, i + batchSize)) store.put(record);
+    for (const key of deletes.slice(i, i + batchSize)) store.delete(key);
+    commitTransaction(tx);
+    await transactionDone(tx);
+  }
+
+  return termDeltas;
+}
+
+async function decrementTermStats(vaultId: string, termDeltas: Map<string, number>): Promise<void> {
+  if (!termDeltas.size) return;
+
+  const db = await openFilesageDb();
+  const entries = Array.from(termDeltas.entries());
+  const batchSize = 200;
+
+  for (let i = 0; i < entries.length; i += batchSize) {
+    await new Promise<void>((resolve, reject) => {
+      const tx = writeTransaction(db, TERM_STAT_STORE);
+      const store = tx.objectStore(TERM_STAT_STORE);
+      const batch = entries.slice(i, i + batchSize);
+      let pending = batch.length;
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+
+      for (const [term, delta] of batch) {
+        const id = `${vaultId}:${term}`;
+        const request = store.get(id);
+        request.onsuccess = () => {
+          const existing = request.result as TermStatRecord | undefined;
+          if (existing) {
+            const df = Math.max(0, existing.df - delta);
+            if (df > 0) store.put({ ...existing, df });
+            else store.delete(id);
+          }
+          pending -= 1;
+          if (pending === 0) commitTransaction(tx);
+        };
+        request.onerror = () => {
+          tx.abort();
+          reject(request.error);
+        };
+      }
+    });
+  }
+}
+
+async function decrementVaultStat(vaultId: string, removedStats: ChunkStatRecord[]): Promise<void> {
+  if (!removedStats.length) return;
+
+  const db = await openFilesageDb();
+  const tx = writeTransaction(db, VAULT_STAT_STORE);
+  const store = tx.objectStore(VAULT_STAT_STORE);
+  const existing = await requestToPromise<VaultStatRecord | undefined>(store.get(vaultId));
+  if (existing) {
+    const removedLength = removedStats.reduce((sum, stat) => sum + stat.tokenCount, 0);
+    const currentLength = existing.avgChunkLength * existing.chunkCount;
+    const chunkCount = Math.max(0, existing.chunkCount - removedStats.length);
+    if (chunkCount > 0) {
+      store.put({
+        id: vaultId,
+        chunkCount,
+        avgChunkLength: Math.max(0, currentLength - removedLength) / chunkCount,
+      });
+    } else {
+      store.delete(vaultId);
+    }
+  }
+  await transactionDone(tx);
+}
+
+export async function deleteFileAndDependents(file: FileEntryRecord): Promise<void> {
+  const removedStats = await listChunkStatsForFile(file.id);
+  const termDeltas = await prunePostingsForFile(file.vaultId, file.id);
+
+  await Promise.all([
+    deleteRecordsByIndex(CHUNK_STORE, "by_file", file.id),
+    deleteRecordsByIndex(VECTOR_STORE, "by_file", file.id),
+    deleteRecordsByIndex(CHUNK_STAT_STORE, "by_file", file.id),
+    decrementTermStats(file.vaultId, termDeltas),
+    decrementVaultStat(file.vaultId, removedStats),
+  ]);
+
+  const db = await openFilesageDb();
+  const tx = writeTransaction(db, FILE_STORE);
+  tx.objectStore(FILE_STORE).delete(file.id);
+  commitTransaction(tx);
+  await transactionDone(tx);
+}
+
 export async function saveFileBatch(files: FileEntryRecord[]): Promise<void> {
   if (!files.length) return;
   const t0 = performance.now();
   const db = await openFilesageDb();
-  const tx = db.transaction(FILE_STORE, "readwrite");
+  const tx = writeTransaction(db, FILE_STORE);
   const store = tx.objectStore(FILE_STORE);
   for (const f of files) store.put(f);
+  commitTransaction(tx);
   await transactionDone(tx);
   recordPipelineTiming('idb-write:files', performance.now() - t0, { count: files.length });
 }
@@ -314,6 +539,21 @@ export async function listAllChunks(): Promise<ChunkRecord[]> {
   return chunks;
 }
 
+export async function getChunksByIds(chunkIds: string[]): Promise<ChunkRecord[]> {
+  if (!chunkIds.length) return [];
+
+  const db = await openFilesageDb();
+  const tx = db.transaction(CHUNK_STORE, "readonly");
+  const store = tx.objectStore(CHUNK_STORE);
+  const chunks = await Promise.all(
+    Array.from(new Set(chunkIds)).map((id) =>
+      requestToPromise<ChunkRecord | undefined>(store.get(id))
+    )
+  );
+  await transactionDone(tx);
+  return chunks.filter((chunk): chunk is ChunkRecord => Boolean(chunk));
+}
+
 export async function countChunks(vaultId?: string): Promise<number> {
   const db = await openFilesageDb();
   const tx = db.transaction(CHUNK_STORE, "readonly");
@@ -343,14 +583,26 @@ export async function saveChunksAndUpdateFileStatus(
 ): Promise<void> {
   const t0 = performance.now();
   const db = await openFilesageDb();
-  const tx = db.transaction([FILE_STORE, CHUNK_STORE], "readwrite");
+  const batchSize = 50;
+
+  for (let i = 0; i < chunks.length; i += batchSize) {
+    const tx = writeTransaction(db, CHUNK_STORE);
+    const chunkStore = tx.objectStore(CHUNK_STORE);
+    for (const chunk of chunks.slice(i, i + batchSize)) chunkStore.put(chunk);
+    commitTransaction(tx);
+    await transactionDone(tx);
+  }
+
+  const tx = writeTransaction(db, FILE_STORE);
   const fileStore = tx.objectStore(FILE_STORE);
-  const chunkStore = tx.objectStore(CHUNK_STORE);
   const file = await requestToPromise<FileEntryRecord | undefined>(fileStore.get(fileId));
-  if (file) fileStore.put({ ...file, extractionStatus: status });
-  for (const chunk of chunks) chunkStore.put(chunk);
+  if (file) fileStore.put({ ...file, extractionStatus: status, indexedAt: Date.now() });
   await transactionDone(tx);
-  recordPipelineTiming('idb-write:chunks', performance.now() - t0, { count: chunks.length });
+
+  recordPipelineTiming('idb-write:chunks', performance.now() - t0, {
+    count: chunks.length,
+    batchSize,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -361,9 +613,10 @@ export async function saveVectorBatch(vectors: VectorRecord[]): Promise<void> {
   if (!vectors.length) return;
   const t0 = performance.now();
   const db = await openFilesageDb();
-  const tx = db.transaction(VECTOR_STORE, "readwrite");
+  const tx = writeTransaction(db, VECTOR_STORE);
   const store = tx.objectStore(VECTOR_STORE);
   for (const v of vectors) store.put(v);
+  commitTransaction(tx);
   await transactionDone(tx);
   recordPipelineTiming('idb-write:vectors', performance.now() - t0, { count: vectors.length });
 }
@@ -404,8 +657,78 @@ export async function countVectors(vaultId?: string): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Lexical index helpers (v4)
+// Lexical index helpers (v6)
 // ---------------------------------------------------------------------------
+
+function savePostingEntryBatch(
+  db: IDBDatabase,
+  vaultId: string,
+  entries: Array<[string, PostingListRecord["list"]]>
+): Promise<void> {
+  if (!entries.length) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const tx = writeTransaction(db, POSTING_STORE);
+    const store = tx.objectStore(POSTING_STORE);
+    let pending = entries.length;
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+
+    for (const [term, list] of entries) {
+      const request = store.get([vaultId, term]);
+      request.onsuccess = () => {
+        const existing = request.result as PostingListRecord | undefined;
+        store.put({
+          vaultId,
+          term,
+          list: existing ? [...existing.list, ...list] : list,
+        });
+        pending -= 1;
+        if (pending === 0) commitTransaction(tx);
+      };
+      request.onerror = () => {
+        tx.abort();
+        reject(request.error);
+      };
+    }
+  });
+}
+
+function saveTermStatBatch(
+  db: IDBDatabase,
+  termStats: TermStatRecord[]
+): Promise<void> {
+  if (!termStats.length) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const tx = writeTransaction(db, TERM_STAT_STORE);
+    const store = tx.objectStore(TERM_STAT_STORE);
+    let pending = termStats.length;
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+
+    for (const termStat of termStats) {
+      const request = store.get(termStat.id);
+      request.onsuccess = () => {
+        const existing = request.result as TermStatRecord | undefined;
+        store.put({
+          ...termStat,
+          df: (existing?.df ?? 0) + termStat.df,
+        });
+        pending -= 1;
+        if (pending === 0) commitTransaction(tx);
+      };
+      request.onerror = () => {
+        tx.abort();
+        reject(request.error);
+      };
+    }
+  });
+}
 
 export async function savePostingBatch(
   postings: PostingRecord[],
@@ -416,28 +739,44 @@ export async function savePostingBatch(
   if (!postings.length && !chunkStats.length) return;
   const t0 = performance.now();
   const db = await openFilesageDb();
-  const tx = db.transaction(
-    [POSTING_STORE, TERM_STAT_STORE, CHUNK_STAT_STORE, VAULT_STAT_STORE],
-    "readwrite"
-  );
-  const postingStore = tx.objectStore(POSTING_STORE);
-  const termStore = tx.objectStore(TERM_STAT_STORE);
-  const chunkStatStore = tx.objectStore(CHUNK_STAT_STORE);
-  const vaultStatStore = tx.objectStore(VAULT_STAT_STORE);
-
-  for (const p of postings) postingStore.put(p);
-  for (const c of chunkStats) chunkStatStore.put(c);
-
-  for (const t of termStats) {
-    const existing = await requestToPromise<TermStatRecord | undefined>(
-      termStore.get(t.id)
-    );
-    termStore.put({
-      ...t,
-      df: (existing?.df ?? 0) + t.df,
+  const postingsByTerm = new Map<string, PostingListRecord["list"]>();
+  for (const posting of postings) {
+    const list = postingsByTerm.get(posting.term) ?? [];
+    list.push({
+      chunkId: posting.chunkId,
+      fileId: posting.fileId,
+      tf: posting.tf,
     });
+    postingsByTerm.set(posting.term, list);
   }
 
+  const postingEntries = Array.from(postingsByTerm.entries());
+  const postingBatchSize = 200;
+  for (let i = 0; i < postingEntries.length; i += postingBatchSize) {
+    await savePostingEntryBatch(
+      db,
+      vaultStat.id,
+      postingEntries.slice(i, i + postingBatchSize)
+    );
+  }
+
+  for (let i = 0; i < termStats.length; i += postingBatchSize) {
+    await saveTermStatBatch(db, termStats.slice(i, i + postingBatchSize));
+  }
+
+  const chunkStatBatchSize = 50;
+  for (let i = 0; i < chunkStats.length; i += chunkStatBatchSize) {
+    const tx = writeTransaction(db, CHUNK_STAT_STORE);
+    const chunkStatStore = tx.objectStore(CHUNK_STAT_STORE);
+    for (const c of chunkStats.slice(i, i + chunkStatBatchSize)) {
+      chunkStatStore.put(c);
+    }
+    commitTransaction(tx);
+    await transactionDone(tx);
+  }
+
+  const vaultStatTx = writeTransaction(db, VAULT_STAT_STORE);
+  const vaultStatStore = vaultStatTx.objectStore(VAULT_STAT_STORE);
   const existingVaultStat = await requestToPromise<VaultStatRecord | undefined>(
     vaultStatStore.get(vaultStat.id)
   );
@@ -456,11 +795,14 @@ export async function savePostingBatch(
     vaultStatStore.put(vaultStat);
   }
 
-  await transactionDone(tx);
+  await transactionDone(vaultStatTx);
   recordPipelineTiming('idb-write:postings', performance.now() - t0, { 
     postingCount: postings.length, 
     termCount: termStats.length,
-    chunkStatCount: chunkStats.length 
+    chunkStatCount: chunkStats.length,
+    postingRecordCount: postingEntries.length,
+    postingBatchSize,
+    chunkStatBatchSize,
   });
 }
 
@@ -470,14 +812,23 @@ export async function getPostingsForTerms(
 ): Promise<Map<string, PostingRecord[]>> {
   const db = await openFilesageDb();
   const tx = db.transaction(POSTING_STORE, "readonly");
-  const index = tx.objectStore(POSTING_STORE).index("vaultId_term");
+  const store = tx.objectStore(POSTING_STORE);
   const result = new Map<string, PostingRecord[]>();
 
   await Promise.all(
     terms.map(async (term) => {
-      const postings = await requestToPromise<PostingRecord[]>(
-        index.getAll(IDBKeyRange.only([vaultId, term]))
+      const record = await requestToPromise<PostingListRecord | undefined>(
+        store.get([vaultId, term])
       );
+      const postings: PostingRecord[] =
+        record?.list.map((posting) => ({
+          id: `${vaultId}:${term}:${posting.chunkId}`,
+          vaultId,
+          term,
+          chunkId: posting.chunkId,
+          fileId: posting.fileId,
+          tf: posting.tf,
+        })) ?? [];
       if (postings.length > 0) result.set(term, postings);
     })
   );

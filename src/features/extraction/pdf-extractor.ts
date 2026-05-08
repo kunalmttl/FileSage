@@ -28,6 +28,9 @@ async function getPdfjs() {
 
 /** Max characters to extract from a PDF (~200 KB). */
 const MAX_CHARS = 200_000;
+const TEXT_SAMPLE_PAGES = 3;
+const MIN_CHARS_PER_PAGE = 50;
+const MAX_PAGES = 100;
 
 /**
  * Extracts text from a PDF File using PDF.js.
@@ -52,8 +55,34 @@ export async function extractPdfText(file: File): Promise<ExtractionResult | nul
     const pageTexts: string[] = [];
     let totalChars = 0;
     let truncated = false;
+    const probeTo = Math.min(TEXT_SAMPLE_PAGES, pdf.numPages);
+    let probeChars = 0;
 
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    for (let pageNum = 1; pageNum <= probeTo; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const content = await page.getTextContent();
+      probeChars += content.items.reduce(
+        (sum, item) => sum + ("str" in item ? item.str.length : 0),
+        0
+      );
+    }
+
+    if (probeChars < MIN_CHARS_PER_PAGE * probeTo) {
+      const perfMs = performance.now() - t0;
+      recordPipelineTiming('extraction:pdf', perfMs, {
+        fileSize: file.size,
+        charsExtracted: 0,
+        pageCount: pdf.numPages,
+        sampledPages: probeTo,
+        noText: 1,
+        imageOnlyEarlyExit: 1,
+      });
+      return null;
+    }
+
+    const pagesToExtract = Math.min(pdf.numPages, MAX_PAGES);
+
+    for (let pageNum = 1; pageNum <= pagesToExtract; pageNum++) {
       if (totalChars >= MAX_CHARS) {
         truncated = true;
         break;
@@ -97,7 +126,9 @@ export async function extractPdfText(file: File): Promise<ExtractionResult | nul
     recordPipelineTiming('extraction:pdf', perfMs, { 
       fileSize: file.size, 
       charsExtracted: text.length,
-      pageCount: pdf.numPages 
+      pageCount: pdf.numPages,
+      pagesExtracted: pagesToExtract,
+      pageCapped: pagesToExtract < pdf.numPages ? 1 : 0,
     });
     return { text, method: "text", truncated };
   } catch {

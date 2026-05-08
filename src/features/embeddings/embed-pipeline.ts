@@ -12,7 +12,7 @@ import { saveVectorBatch } from "@/lib/db/filesage-db";
 import { recordPipelineTiming } from "@/lib/performance/metrics";
 import type { ChunkRecord, VectorRecord } from "@/lib/db/types";
 
-const BATCH_SIZE = 32;
+const BATCH_SIZE = 6;
 const PROGRESS_INTERVAL_MS = 150;
 
 export type EmbedProgress = {
@@ -211,6 +211,8 @@ export async function embedChunks(
       stage: "embedding",
       message: `Embedding chunks… ${processed}/${chunks.length}`,
     });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   lastProgressAt = 0;
