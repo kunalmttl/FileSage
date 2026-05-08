@@ -12,6 +12,7 @@
 import { chunkText } from "@/features/extraction/chunker";
 import { extractPdfText } from "@/features/extraction/pdf-extractor";
 import { extractText } from "@/features/extraction/text-extractor";
+import { buildKeywordIndex } from "@/features/retrieval/keyword-index";
 import { saveChunksAndUpdateFileStatus } from "@/lib/db/filesage-db";
 import type { ChunkRecord, ExtractionStatus, FileEntryRecord } from "@/lib/db/types";
 
@@ -95,6 +96,11 @@ export async function extractAndChunkFiles(
 
     // Single transaction: write chunks + update file status together.
     await saveChunksAndUpdateFileStatus(record.id, chunkRecords, status);
+
+    // Build keyword index for this file's chunks (only if we got chunks).
+    if (chunkRecords.length > 0) {
+      await buildKeywordIndex(chunkRecords, record.vaultId);
+    }
 
     // Update shared counters.
     processed += 1;

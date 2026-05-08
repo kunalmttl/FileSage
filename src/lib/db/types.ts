@@ -79,3 +79,45 @@ export type VectorRecord = {
   vector: number[];
   embeddedAt: number;
 };
+
+// ---------------------------------------------------------------------------
+// Lexical index types (DB v4)
+// ---------------------------------------------------------------------------
+
+/** One record per (vaultId, term, chunkId). */
+export type PostingRecord = {
+  /** `{vaultId}:{term}:{chunkId}` */
+  id: string;
+  vaultId: string;
+  term: string;
+  chunkId: string;
+  fileId: string;
+  /** Raw term frequency in this chunk. */
+  tf: number;
+};
+
+/** One record per (vaultId, term). */
+export type TermStatRecord = {
+  /** `{vaultId}:{term}` */
+  id: string;
+  vaultId: string;
+  term: string;
+  /** Number of chunks containing this term. */
+  df: number;
+};
+
+/** One record per chunk — stores token count for BM25 length normalization. */
+export type ChunkStatRecord = {
+  /** Same id as ChunkRecord. */
+  id: string;
+  vaultId: string;
+  fileId: string;
+  tokenCount: number;
+};
+
+/** One record per vault — stores avg chunk length for BM25. */
+export type VaultStatRecord = {
+  id: string; // vaultId
+  avgChunkLength: number;
+  chunkCount: number;
+};

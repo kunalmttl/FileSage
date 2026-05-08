@@ -10,6 +10,7 @@
  */
 
 import type { ExtractionResult } from "@/features/extraction/text-extractor";
+import { recordPipelineTiming } from "@/lib/performance/metrics";
 
 let pdfjsLib: typeof import("pdfjs-dist") | null = null;
 
@@ -33,6 +34,7 @@ const MAX_CHARS = 200_000;
  * Returns null on failure so the pipeline can mark the file as skipped.
  */
 export async function extractPdfText(file: File): Promise<ExtractionResult | null> {
+  const t0 = performance.now();
   try {
     const pdfjs = await getPdfjs();
     const arrayBuffer = await file.arrayBuffer();
@@ -80,10 +82,30 @@ export async function extractPdfText(file: File): Promise<ExtractionResult | nul
     }
 
     const text = pageTexts.join("\n\n").trim();
-    if (!text) return null;
+    const perfMs = performance.now() - t0;
+    
+    if (!text) {
+      recordPipelineTiming('extraction:pdf', perfMs, { 
+        fileSize: file.size, 
+        charsExtracted: 0,
+        pageCount: pdf.numPages,
+        noText: 1 
+      });
+      return null;
+    }
 
+    recordPipelineTiming('extraction:pdf', perfMs, { 
+      fileSize: file.size, 
+      charsExtracted: text.length,
+      pageCount: pdf.numPages 
+    });
     return { text, method: "text", truncated };
   } catch {
+    const perfMs = performance.now() - t0;
+    recordPipelineTiming('extraction:pdf', perfMs, { 
+      fileSize: file.size, 
+      failed: 1 
+    });
     return null;
   }
 }

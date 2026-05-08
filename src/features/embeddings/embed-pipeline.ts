@@ -9,6 +9,7 @@
  */
 
 import { saveVectorBatch } from "@/lib/db/filesage-db";
+import { recordPipelineTiming } from "@/lib/performance/metrics";
 import type { ChunkRecord, VectorRecord } from "@/lib/db/types";
 
 const BATCH_SIZE = 32;
@@ -35,7 +36,6 @@ export type EmbedSummary = {
 // ---------------------------------------------------------------------------
 
 let workerInstance: Worker | null = null;
-let workerReady = false;
 let workerReadyPromise: Promise<void> | null = null;
 
 function getWorker(): { worker: Worker; ready: Promise<void> } {
@@ -48,7 +48,6 @@ function getWorker(): { worker: Worker; ready: Promise<void> } {
     workerReadyPromise = new Promise<void>((resolve) => {
       const handler = (e: MessageEvent) => {
         if (e.data?.type === "ready") {
-          workerReady = true;
           workerInstance!.removeEventListener("message", handler);
           resolve();
         }
@@ -79,6 +78,8 @@ function embedBatch(
         id: string;
         vectors?: number[][];
         message?: string;
+        perfMs?: number;
+        batchSize?: number;
       };
 
       if (msg.id !== id) return;
@@ -86,6 +87,11 @@ function embedBatch(
       worker.removeEventListener("message", handler);
 
       if (msg.type === "result" && msg.vectors) {
+        if (msg.perfMs) {
+          recordPipelineTiming('embedding:batch', msg.perfMs, { 
+            batchSize: msg.batchSize ?? texts.length 
+          });
+        }
         resolve(msg.vectors);
       } else if (msg.type === "error") {
         reject(new Error(msg.message ?? "Embedding worker error"));
@@ -94,6 +100,43 @@ function embedBatch(
 
     worker.addEventListener("message", handler);
     worker.postMessage({ type: "embed", id, texts });
+  });
+}
+
+export async function embedQuery(text: string): Promise<number[]> {
+  const { worker, ready } = getWorker();
+  await ready;
+
+  return new Promise((resolve, reject) => {
+    const id = `query-${++requestCounter}`;
+
+    const handler = (e: MessageEvent) => {
+      const msg = e.data as {
+        type: string;
+        id: string;
+        vector?: number[];
+        message?: string;
+        perfMs?: number;
+      };
+
+      if (msg.id !== id) return;
+
+      worker.removeEventListener("message", handler);
+
+      if (msg.type === "query-result" && msg.vector) {
+        if (msg.perfMs) {
+          recordPipelineTiming('embedding:query', msg.perfMs, { 
+            batchSize: 1 
+          });
+        }
+        resolve(msg.vector);
+      } else if (msg.type === "error") {
+        reject(new Error(msg.message ?? "Embedding worker error"));
+      }
+    };
+
+    worker.addEventListener("message", handler);
+    worker.postMessage({ type: "embed-query", id, text });
   });
 }
 

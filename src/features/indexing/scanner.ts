@@ -1,5 +1,6 @@
 import { getWebkitRelativePath } from "@/features/file-access/picker";
 import type { FileEntryRecord, VaultRecord, VaultScanStats } from "@/lib/db/types";
+import { recordPipelineTiming } from "@/lib/performance/metrics";
 
 const BATCH_SIZE = 100;
 
@@ -27,6 +28,7 @@ export async function scanDirectoryHandleVault(
     throw new Error("Directory picker vault is missing its root handle.");
   }
 
+  const t0 = performance.now();
   const files: FileEntryRecord[] = [];
   const pendingBatch: FileEntryRecord[] = [];
   const progress: ScanProgress = {
@@ -79,6 +81,12 @@ export async function scanDirectoryHandleVault(
   await walkDirectory(vault.handle, []);
   await flushBatch();
 
+  const scanMs = performance.now() - t0;
+  recordPipelineTiming('scan:total', scanMs, { 
+    filesFound: progress.filesScanned, 
+    totalBytes: progress.totalBytes 
+  });
+
   return {
     files,
     stats: {
@@ -94,6 +102,7 @@ export async function scanUploadedFolderVault(
   fileList: FileList,
   callbacks: ScanCallbacks = {}
 ): Promise<ScanResult> {
+  const t0 = performance.now();
   const files: FileEntryRecord[] = [];
   const pendingBatch: FileEntryRecord[] = [];
   const progress: ScanProgress = {
@@ -136,6 +145,12 @@ export async function scanUploadedFolderVault(
   }
 
   await flushBatch();
+
+  const scanMs = performance.now() - t0;
+  recordPipelineTiming('scan:total', scanMs, { 
+    filesFound: progress.filesScanned, 
+    totalBytes: progress.totalBytes 
+  });
 
   return {
     files,

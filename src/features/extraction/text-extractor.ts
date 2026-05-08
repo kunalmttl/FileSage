@@ -3,6 +3,8 @@
  * Returns null for unsupported types — PDF is handled separately later.
  */
 
+import { recordPipelineTiming } from "@/lib/performance/metrics";
+
 const TEXT_EXTENSIONS = new Set([
   // Plain text
   "txt", "md", "mdx", "markdown", "log", "text",
@@ -49,12 +51,25 @@ export async function extractText(
     return null;
   }
 
+  const t0 = performance.now();
+
   try {
     const raw = await readFileAsText(file);
     const truncated = raw.length > MAX_CHARS;
     const text = truncated ? raw.slice(0, MAX_CHARS) : raw;
-    return { text, method: "text", truncated };
+    const result = { text, method: "text" as const, truncated };
+    
+    recordPipelineTiming('extraction:text', performance.now() - t0, { 
+      fileSize: file.size, 
+      charsExtracted: text.length 
+    });
+    
+    return result;
   } catch {
+    recordPipelineTiming('extraction:text', performance.now() - t0, { 
+      fileSize: file.size, 
+      failed: 1 
+    });
     return null;
   }
 }

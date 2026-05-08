@@ -127,4 +127,10 @@
   html {
     @apply font-sans;
   }
+  mark {
+    background-color: oklch(0.9 0.1 100 / 0.5);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
 }

@@ -30,6 +30,7 @@ import {
 import {
   clearChunksForVault,
   clearFilesForVault,
+  clearLexicalIndexForVault,
   clearVectorsForVault,
   deleteVault,
   listChunksForVault,
@@ -153,6 +154,7 @@ export function VaultConnector() {
         clearFilesForVault(vault.id),
         clearChunksForVault(vault.id),
         clearVectorsForVault(vault.id),
+        clearLexicalIndexForVault(vault.id),
       ]);
       setMessage(`Scanning ${vault.name}.`);
       const scannedFiles: FileEntryRecord[] = [];
@@ -193,6 +195,7 @@ export function VaultConnector() {
         clearFilesForVault(vault.id),
         clearChunksForVault(vault.id),
         clearVectorsForVault(vault.id),
+        clearLexicalIndexForVault(vault.id),
       ]);
       setMessage(`Scanning ${vault.name}.`);
       const result = await scanUploadedFolderVault(vault, fileList, {
@@ -247,6 +250,7 @@ export function VaultConnector() {
         clearFilesForVault(v.id),
         clearChunksForVault(v.id),
         clearVectorsForVault(v.id),
+        clearLexicalIndexForVault(v.id),
       ]);
       setMessage(`Rescanning ${v.name}.`);
       const scannedFiles: FileEntryRecord[] = [];

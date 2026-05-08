@@ -6,11 +6,13 @@
  *
  * Message protocol (main -> worker):
  *   { type: "embed", id: string, texts: string[] }
+ *   { type: "embed-query", id: string, text: string }
  *
  * Message protocol (worker -> main):
  *   { type: "ready" }
  *   { type: "progress", message: string }
  *   { type: "result", id: string, vectors: number[][] }
+ *   { type: "query-result", id: string, vector: number[] }
  *   { type: "error", id: string, message: string }
  */
 
@@ -60,29 +62,55 @@ function normalizeVector(raw: Float32Array): number[] {
   return out;
 }
 
+type WorkerMessage =
+  | { type: "embed"; id: string; texts: string[] }
+  | { type: "embed-query"; id: string; text: string };
+
 self.onmessage = async (event: MessageEvent) => {
-  const msg = event.data as { type: string; id: string; texts: string[] };
-  if (msg.type !== "embed") return;
+  const msg = event.data as WorkerMessage;
+  if (msg.type !== "embed" && msg.type !== "embed-query") return;
 
   try {
     const model = await getEmbedder();
+    const texts = msg.type === "embed-query" ? [msg.text] : msg.texts;
+
+    // Time the embedding inference
+    const t0 = performance.now();
 
     // Batch embed — single forward pass for all texts.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const output = await (model as any)(msg.texts, {
+    const output = await (model as any)(texts, {
       pooling: "mean",
       normalize: false,
     });
 
+    const perfMs = performance.now() - t0;
+
     const data = output.data as Float32Array;
-    const dims = data.length / msg.texts.length;
+    const dims = data.length / texts.length;
     const vectors: number[][] = [];
 
-    for (let i = 0; i < msg.texts.length; i++) {
+    for (let i = 0; i < texts.length; i++) {
       vectors.push(normalizeVector(data.slice(i * dims, (i + 1) * dims)));
     }
 
-    self.postMessage({ type: "result", id: msg.id, vectors });
+    if (msg.type === "embed-query") {
+      self.postMessage({ 
+        type: "query-result", 
+        id: msg.id, 
+        vector: vectors[0],
+        perfMs,
+        batchSize: 1 
+      });
+    } else {
+      self.postMessage({ 
+        type: "result", 
+        id: msg.id, 
+        vectors,
+        perfMs,
+        batchSize: texts.length 
+      });
+    }
   } catch (err) {
     self.postMessage({
       type: "error",

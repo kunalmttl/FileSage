@@ -8,7 +8,6 @@ import {
   FileText,
   FileVideo,
   Filter,
-  Loader2,
   Search,
   X,
 } from "lucide-react";
@@ -93,11 +92,15 @@ export function FileMetadataBrowser() {
   }, [selectedVaultId, search, extensionFilter]);
 
   useEffect(() => {
-    void loadVaults();
+    queueMicrotask(() => {
+      void loadVaults();
+    });
   }, [loadVaults]);
 
   useEffect(() => {
-    void loadFiles();
+    queueMicrotask(() => {
+      void loadFiles();
+    });
   }, [loadFiles]);
 
   const paged = useMemo(
