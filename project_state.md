@@ -1,10 +1,10 @@
 # FileSage Project State
 
-Last updated: 2026-05-08 (pipeline instrumentation implemented)
+Last updated: 2026-05-08 (performance optimization and incremental indexing implemented)
 
 ## Current Status
 
-Full local indexing pipeline is operational with complete performance instrumentation:
+Full local indexing pipeline is operational with performance instrumentation, optimized retrieval, and incremental rescans:
 
 - Vault connection through directory picker plus upload fallback.
 - Recursive file scanning with IndexedDB persistence.
@@ -13,10 +13,22 @@ Full local indexing pipeline is operational with complete performance instrument
 - Embeddings through `@huggingface/transformers` using `Xenova/all-MiniLM-L6-v2`.
 - Local vector persistence in IndexedDB.
 - File metadata browser.
-- Keyword retrieval and Search UI.
+- Hybrid retrieval and Search UI.
 - **Pipeline performance instrumentation**: scan, extraction (text/PDF), embedding, and IndexedDB writes are now timed and visible in Settings.
+- **Search hot path optimized**: snippet chunk loading now fetches only top fused chunk IDs instead of loading whole vault chunk sets.
+- **IndexedDB write path optimized**: chunks/vectors/files use relaxed durability; chunks and postings are sub-batched.
+- **Postings schema optimized**: IndexedDB postings are stored as one record per `(vaultId, term)` with posting arrays.
+- **Incremental directory rescans**: rescans classify files as new, changed, unchanged, or deleted and only re-index new/changed files.
 
 Previously verified pipeline: 20 files -> 15 extracted -> 586 chunks -> 586 vectors embedded.
+
+Recent performance verification:
+
+- Search `loadChunks`: about 5450ms -> about 3-6ms after targeted chunk ID loading.
+- Total search: about 5735ms -> about 338ms on the measured vault.
+- Embedding batches: 48-73s batches -> 6-11s progress ticks with smaller batch size.
+- Chunk writes: no current budget warnings after 50-record sub-batching.
+- Incremental rescan: unchanged files are skipped instead of re-extracted and re-embedded.
 
 Search bug fixes applied:
 
@@ -27,7 +39,7 @@ Search bug fixes applied:
 - Lexical stats now accumulate across per-file indexing calls instead of overwriting vault-level BM25 stats.
 - Rescan/connect flows clear the lexical index along with files, chunks, and vectors.
 - Search UI reloads files per search so it does not depend on stale mount-time file state.
-- Semantic mode toggle is disabled until query-vector retrieval is wired.
+- Hybrid search uses BM25 + semantic vector scoring + RRF fusion.
 
 Pipeline instrumentation implemented:
 
@@ -42,6 +54,16 @@ Pipeline instrumentation implemented:
 
 Verified: Pipeline timings are working and visible in `/settings` Performance debug card.
 
+Performance optimization implemented:
+
+- `src/features/retrieval/search-service.ts`: loads only top fused snippet chunk IDs with `getChunksByIds()`.
+- `src/lib/db/filesage-db.ts`: IndexedDB bumped to v7; postings migrated to per-term records; chunk/vector/file writes use relaxed durability; chunks, postings, term stats, and chunk stats are sub-batched.
+- `src/features/embeddings/embed-pipeline.ts`: embedding batch size reduced to 6 with a yield between batches for better visible progress.
+- `src/features/extraction/pdf-extractor.ts`: image-only PDF early exit and 100-page extraction cap added.
+- `src/features/indexing/fingerprint.ts`: cheap file fingerprint helper using `relativePath + size + lastModified`.
+- `src/features/indexing/scan-classifier.ts`: classifies scanned files as new, changed, unchanged, or deleted.
+- `src/features/file-access/components/vault-connector.tsx`: directory rescans now classify first, clean only changed/deleted dependents, process only new/changed files, and show classification counters.
+
 ## Decisions Captured
 
 - Product name: FileSage.
@@ -52,10 +74,10 @@ Verified: Pipeline timings are working and visible in `/settings` Performance de
 - AI posture: strictly local-only. No paid API and no cloud.
 - Folder model: user-selected folders as vaults, indexed and vectorized locally.
 - UI: clean light mode, beige background, flat palette, rounded shadcn/ui elements.
-- Storage: IndexedDB DB v5 with `vaults`, `files`, `chunks`, `vectors`, `postings`, `term_stats`, `chunk_stats`, and `vault_stats`.
+- Storage: IndexedDB DB v7 with `vaults`, `files`, `chunks`, `vectors`, per-term `postings`, `term_stats`, `chunk_stats`, and `vault_stats`.
 - Future storage candidate: RxDB plus OPFS-backed storage.
 - Embedding model: `Xenova/all-MiniLM-L6-v2`, 384-dimensional vectors, cached in browser after first download.
-- Retrieval strategy: keyword/BM25 retrieval works. Semantic query-vector retrieval and true hybrid fusion are pending.
+- Retrieval strategy: hybrid retrieval works with BM25, semantic vector scoring, and RRF fusion.
 - File operations: MVP is dry-run only. Real rename/move requires explicit approval, undo, and audit log.
 
 ## Components and Files Built
@@ -66,7 +88,7 @@ Verified: Pipeline timings are working and visible in `/settings` Performance de
 
 ### DB Layer
 
-- `src/lib/db/filesage-db.ts`: IndexedDB v5 wrapper with vault, file, chunk, vector, and lexical index helpers. All batch writes instrumented.
+- `src/lib/db/filesage-db.ts`: IndexedDB v7 wrapper with vault, file, chunk, vector, and lexical index helpers. Batch writes, targeted chunk loads, posting storage, and incremental cleanup are instrumented/optimized.
 - `src/lib/db/types.ts`: vault/file/chunk/vector/extraction/lexical index types.
 
 ### File Access
@@ -77,6 +99,8 @@ Verified: Pipeline timings are working and visible in `/settings` Performance de
 ### Indexing
 
 - `src/features/indexing/scanner.ts`: recursive directory walk with batch callbacks.
+- `src/features/indexing/fingerprint.ts`: computes cheap file fingerprints from relative path, size, and last modified time.
+- `src/features/indexing/scan-classifier.ts`: compares scan results against IndexedDB records and identifies new, changed, unchanged, and deleted files.
 
 ### Extraction
 
@@ -96,8 +120,8 @@ Verified: Pipeline timings are working and visible in `/settings` Performance de
 - `src/features/retrieval/keyword-index.ts`: postings, term stats, chunk stats, vault stats.
 - `src/features/retrieval/bm25.ts`: BM25 scoring.
 - `src/features/retrieval/snippets.ts`: highlighted snippet extraction.
-- `src/features/retrieval/fusion.ts`: RRF utility for later hybrid retrieval.
-- `src/features/retrieval/search-service.ts`: current search orchestration.
+- `src/features/retrieval/fusion.ts`: RRF utility used for hybrid retrieval.
+- `src/features/retrieval/search-service.ts`: hybrid search orchestration with targeted snippet chunk loading.
 
 ### UI
 
@@ -111,17 +135,18 @@ Verified: Pipeline timings are working and visible in `/settings` Performance de
 
 1. ~~Add lightweight performance instrumentation before adding more heavy feature work.~~ ✅ Complete
 2. Verify pipeline timings in `/settings` Performance debug card. ✅ Verified working
-3. Add incremental indexing (file fingerprinting) to stop full rebuilds.
-4. Add query embedding path for semantic/vector retrieval.
-5. Add true hybrid fusion after semantic query vectors are available.
-6. Begin worker orchestration optimization.
+3. ~~Add incremental indexing (file fingerprinting) to stop full rebuilds.~~ Complete
+4. ~~Add query embedding path for semantic/vector retrieval.~~ Complete
+5. ~~Add true hybrid fusion after semantic query vectors are available.~~ Complete
+6. Build grounded `/ask` on top of the now-fast hybrid retrieval path.
+7. Begin deeper worker orchestration optimization.
 
 ## Performance Issues Identified
 
 1. Main thread lag during extraction/embedding orchestration.
-2. IndexedDB write pressure from many transactions.
+2. IndexedDB write pressure from many transactions. Partially mitigated with relaxed durability, sub-batches, and per-term postings.
 3. File metadata browser loads all file records on filter changes.
-4. No incremental indexing; rescans clear and rewrite everything.
+4. Incremental indexing is implemented for directory-vault rescans; upload fallback still uses full rebuild semantics.
 5. Vault connector progress updates trigger broad re-renders.
 6. PDF.js reads full PDFs into memory before extraction.
 7. `@xenova/transformers` is redundant if still installed; `@huggingface/transformers` v4 is the correct package.
@@ -163,67 +188,68 @@ Current methodology:
 - Directory handles persist where supported.
 - Permissions are checked before reuse.
 - Fallback uploads support browsers without persistent folder handles.
+- Directory-vault rescans compute file fingerprints and classify files before heavy work starts.
 
 Performance risk:
 
-- Current rescans are full rebuilds.
-- Full rebuild means files, chunks, vectors, postings, and stats are cleared and regenerated.
+- Upload fallback scans still rebuild because the browser cannot automatically re-open an uploaded folder.
+- Changed/deleted file cleanup now prunes dependents, but large posting lists can still be expensive at bigger scale.
 
 Optimization direction:
 
-- Add file fingerprints using `relativePath + size + lastModified`.
-- Compare new scan metadata against prior metadata.
-- Only extract/embed/reindex new or changed files.
-- Delete records only for files that no longer exist.
+- Keep fingerprint-based directory rescans.
+- Add better runtime verification and metrics for changed/deleted cleanup at larger vault sizes.
+- Keep upload fallback as an explicit re-upload/full-rebuild path.
 
-Priority: high.
+Priority: complete for directory-picker vaults; medium for polish.
 
 ### Recursive Scanning
 
 Current methodology:
 
 - Recursive async directory traversal.
-- Batch callbacks for file metadata persistence.
-- Progress displayed in the vault connector.
+- Scan collects file metadata first; rescan classification happens before persistence.
+- Progress and classification counts are displayed in the vault connector.
 
 Performance risk:
 
-- Large folder trees create many progress events and DB writes.
+- Large folder trees create many progress events.
 - Scan is currently tied to UI-triggered orchestration.
 
 Optimization direction:
 
 - Keep batch size explicit.
-- Add scan timing metrics: files/sec, total scan time, skipped/changed/deleted counts.
+- Add richer scan timing metrics: files/sec, total scan time, skipped/changed/deleted counts.
 - Add backpressure later so scanning can pause when extraction/DB queues are saturated.
 - Workerize scan orchestration only after incremental indexing and write batching.
 
-Priority: medium-high.
+Priority: medium.
 
 ### IndexedDB Persistence
 
 Current methodology:
 
-- IndexedDB v5 stores vaults, files, chunks, vectors, postings, term stats, chunk stats, and vault stats.
+- IndexedDB v7 stores vaults, files, chunks, vectors, per-term postings, term stats, chunk stats, and vault stats.
 - Uses indexes and cursor deletes.
 - Lexical index supports BM25.
+- File records include fingerprints for incremental rescans.
 
 Performance risk:
 
-- Many small transactions during extraction, embeddings, vectors, and postings.
+- Some write pressure remains during extraction and lexical indexing, but chunk/vector/posting writes are now batched.
 - `getAll()` patterns will become expensive on large vaults.
 - Vectors as `number[]` are easy but not compact.
 
 Optimization direction:
 
-- Add write timing instrumentation first.
-- Add a write queue that coalesces writes into larger transactions.
+- Keep write timing instrumentation.
+- Consider a write queue only if measured writes remain a bottleneck after current batching.
 - Replace high-risk `getAll()` paths with cursor-based pagination or bounded indexed queries.
 - Add compound indexes for common filters: `vaultId + extension`, `vaultId + lastModified`, possibly `vaultId + fileId`.
 - Consider packed `Float32Array` vector storage later if vector reads/writes dominate.
 - Consider RxDB + OPFS only after measuring IndexedDB as the bottleneck.
 
-Priority: high.
+Priority: medium-high.
 
 ### Extraction
 
@@ -234,6 +260,7 @@ Current methodology:
 - Bounded concurrency of 4 files.
 - Extraction status stored per file.
 - Extraction writes chunks and then builds lexical index.
+- PDFs probe the first pages for text, skip image-only PDFs early, and cap extraction at 100 pages.
 
 Performance risk:
 
@@ -243,8 +270,8 @@ Performance risk:
 
 Optimization direction:
 
-- Add extraction timing per file and per file type.
-- Add max file size and PDF page/size guardrails.
+- Keep extraction timing per file and per file type.
+- Tune max file size and PDF page/size guardrails from real metrics.
 - Add dynamic concurrency later.
 - Move extraction orchestration into a worker after instrumentation and incremental indexing.
 - Keep PDF streaming/range extraction as later advanced work.
@@ -278,21 +305,21 @@ Priority: medium.
 Current methodology:
 
 - Tokenizer shared between indexing and query time.
-- Inverted index stored in IndexedDB.
+- Inverted index stored in IndexedDB as one record per `(vaultId, term)` with posting arrays.
 - BM25-ready term, chunk, and vault stats.
-- Current v5 fix accumulates stats across per-file indexing.
+- Stats accumulate across per-file indexing and are decremented during targeted file cleanup.
 
 Performance risk:
 
-- One posting per `term + chunk` can create many records.
-- Rebuilding lexical index on every rescan is expensive.
+- Very large per-term posting arrays can still become expensive at larger scale.
+- Changed/deleted cleanup prunes posting lists for the affected file.
 
 Optimization direction:
 
-- Keep current posting schema for correctness.
-- Add posting count/index time metrics.
-- Later batch postings across multiple files before writing.
-- If postings become too large, consider per-term compressed posting-list records.
+- Keep current per-term posting schema for correctness and write performance.
+- Continue tracking posting count/index time metrics.
+- Later batch postings across multiple files before writing if needed.
+- If postings become too large, consider compressed posting-list records.
 
 Priority: medium-high.
 
@@ -301,14 +328,15 @@ Priority: medium-high.
 Current methodology:
 
 - Query tokenization.
-- Posting lookup by `vaultId + term`.
+- Posting lookup by `[vaultId, term]`.
 - BM25 scoring.
 - File grouping.
 - Snippet extraction and reasons.
+- Search loads only top fused snippet chunk IDs for result snippets.
 
 Performance risk:
 
-- Common terms can fetch large postings lists.
+- Common terms can fetch large posting lists.
 - Scoring currently runs on the main thread.
 
 Optimization direction:
@@ -326,20 +354,20 @@ Current methodology:
 - `@huggingface/transformers` v4.
 - `Xenova/all-MiniLM-L6-v2`.
 - Embedding worker does model execution.
-- Main thread orchestrates batches and IndexedDB vector writes.
+- Main thread orchestrates smaller embedding batches and IndexedDB vector writes.
 - Vectors are normalized and persisted.
 
 Performance risk:
 
 - Main thread still coordinates each batch and progress update.
-- Vector writes are many small records.
+- CPU-only WASM inference remains the dominant embedding cost.
 - No pause/cancel support.
 
 Optimization direction:
 
-- Add embedding timing per batch.
+- Keep embedding timing per batch.
 - Move more orchestration into the worker.
-- Reduce progress update frequency.
+- Add pause/cancel protocol.
 - Add cancel/pause later.
 - Consider packed vector storage later.
 
@@ -350,24 +378,23 @@ Priority: high.
 Current methodology:
 
 - Vector records exist.
-- Semantic query embedding is not wired yet.
-- RRF fusion utility exists.
-- Semantic UI toggle is disabled until query-vector search is available.
+- Semantic query embedding is wired.
+- BM25 and vector hits are fused with RRF.
+- Search can run keyword, semantic, or hybrid retrieval.
 
 Performance risk:
 
 - Flat scan is O(number of vectors), acceptable now but not indefinitely.
-- Query embeddings and vector scan can block if not workerized.
+- Query embeddings and vector scan can still block if not workerized deeply enough for large vaults.
 
 Optimization direction:
 
-- Implement query embedding with the existing embedding worker or a retrieval worker.
-- Start with flat dot-product scan.
+- Keep query embedding through the existing embedding worker.
+- Continue with flat dot-product scan until measurement says otherwise.
 - Pre-filter by vault and metadata.
-- Fuse BM25 and vector rankings with RRF.
 - Workerize retrieval before large-vault testing.
 
-Priority: high for product value, medium for performance until vector count grows.
+Priority: complete for MVP retrieval; medium for scale.
 
 ### Search UI
 
@@ -378,10 +405,11 @@ Current methodology:
 - File result cards.
 - Snippets and detail panel.
 - Search UI reloads files per search to avoid stale mount state.
+- Snippet text is loaded through targeted chunk ID reads.
 
 Performance risk:
 
-- Search still depends on main-thread retrieval work.
+- Search is now fast on the measured vault but still depends on main-thread retrieval work.
 - Result rendering may get heavy at larger `topK`.
 
 Optimization direction:
@@ -465,18 +493,18 @@ Goal: stop rebuilding entire vaults unnecessarily.
 
 Tasks:
 
-- Add file fingerprint fields to file metadata.
-- During scan, classify files as unchanged, changed, new, or deleted.
-- Skip extraction/chunking/embedding/indexing for unchanged files.
-- Clear dependent records only for changed/deleted files.
-- Update vault stats incrementally where possible.
+- Complete: add file fingerprint fields to file metadata.
+- Complete: during scan, classify files as unchanged, changed, new, or deleted.
+- Complete: skip extraction/chunking/embedding/indexing for unchanged files.
+- Complete: clear dependent records only for changed/deleted files.
+- Partial: vault/file stats are updated from the scan result; BM25 vault stats are decremented during targeted cleanup.
 
 Expected impact:
 
 - Biggest improvement for repeated rescans.
 - Makes real personal usage practical.
 
-Priority: high.
+Priority: complete for directory-picker rescans.
 
 ### Performance Phase 2: IndexedDB Write Queue and Batching
 
@@ -484,17 +512,19 @@ Goal: reduce transaction overhead.
 
 Tasks:
 
-- Introduce a DB write queue for chunks, vectors, postings, and stats.
-- Flush records in larger transactions.
-- Audit helpers that are called in loops.
-- Replace broad `getAll()` paths in hot UI/search paths.
+- Complete: chunk writes are split into 50-record transactions.
+- Complete: postings are stored as per-term records and written in 200-term sub-batches.
+- Complete: term stats and chunk stats are sub-batched.
+- Complete: file/vector/chunk/posting writes use relaxed durability where appropriate.
+- Complete: search no longer loads all chunks for snippets.
+- Pending: replace broad metadata-browser `getAll()` paths with cursor/index-backed pagination.
 
 Expected impact:
 
 - Lower UI lag during indexing.
 - Better scalability with larger vaults.
 
-Priority: high.
+Priority: mostly complete for pipeline/search hot paths; medium for metadata browser.
 
 ### Performance Phase 3: Workerized Pipeline Orchestration
 
@@ -522,14 +552,15 @@ Tasks:
 - Move BM25 lookup/scoring, vector scan, and RRF fusion into a retrieval worker.
 - Return only top-K file-grouped results to UI.
 - Add query timing diagnostics.
-- Wire semantic query embeddings and hybrid search.
+- Complete: semantic query embeddings and hybrid search are wired.
+- Pending: move retrieval scoring and vector scan into a dedicated retrieval worker for larger vaults.
 
 Expected impact:
 
 - Search UI remains responsive.
 - Enables semantic/hybrid retrieval without blocking rendering.
 
-Priority: high for search scale and product feel.
+Priority: medium for search scale.
 
 ### Performance Phase 5: Data Shape Improvements
 
@@ -554,20 +585,20 @@ Priority: medium/advanced.
 
 Immediate:
 
-1. Rescan vault and verify keyword search.
-2. Add instrumentation.
-3. Add incremental indexing.
+1. Build grounded `/ask` with citations on top of hybrid retrieval.
+2. Add answer composition over retrieved snippets.
+3. Add source/citation UX and retrieval confidence display.
 
 Next:
 
-4. Add DB write queue/batching.
-5. Move extraction/embedding orchestration further into workers.
-6. Add semantic query embedding and hybrid retrieval.
+4. Move extraction/embedding orchestration further into workers.
+5. Add pause/cancel/resume for long indexing jobs.
+6. Replace metadata browser `getAll()` filtering with cursor/index-backed pagination.
 
 Later:
 
 7. Retrieval worker.
-8. Cursor-based metadata browser.
+8. Cursor-based metadata browser refinements.
 9. Packed vector storage or compressed postings if measured as necessary.
 10. OPFS/RxDB evaluation only after IndexedDB is proven insufficient.
 
@@ -591,19 +622,19 @@ Later:
 - Chunking: complete.
 - Metadata browser and filters: complete.
 - Lexical index: complete.
-- Incremental scan/change detection: pending.
+- Incremental scan/change detection: complete for directory-picker vaults.
 
 ### Phase 3: AI Retrieval
 
 - Keyword search: complete.
 - Search UI: complete.
-- Semantic query embeddings: pending.
-- Hybrid retrieval: pending.
+- Semantic query embeddings: complete.
+- Hybrid retrieval: complete.
 - Metadata filters and reranking: partial.
 
 ### Phase 4: Trust and Polish
 
-- Ask mode with citations.
+- Ask mode with citations: next priority.
 - Rename/move approval flow.
 - Undo/action log.
 - Duplicate detection.
