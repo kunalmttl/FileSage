@@ -58,6 +58,23 @@ export function SourcePanel({
             <p className="mt-3 line-clamp-5 text-xs leading-5 text-muted-foreground">
               {chunk.text.replace(/\s+/g, " ")}
             </p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {chunk.retrievalModes?.map((mode) => (
+                <Badge key={mode} variant="secondary" className="rounded-full text-[10px]">
+                  {mode}
+                </Badge>
+              ))}
+              {chunk.matchedTerms?.slice(0, 6).map((term) => (
+                <Badge key={term} variant="outline" className="rounded-full text-[10px]">
+                  {term}
+                </Badge>
+              ))}
+            </div>
+            {chunk.reasons?.length ? (
+              <p className="mt-2 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                {chunk.reasons.slice(0, 3).join(" | ")}
+              </p>
+            ) : null}
           </div>
         ))}
       </div>

@@ -2,10 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Database, SlidersHorizontal } from "lucide-react";
-import { buildAskMessages, buildContextChunks } from "@/features/ask/context-builder";
+import { buildAskMessages } from "@/features/ask/context-builder";
 import type { ContextChunk } from "@/features/ask/context-builder";
 import { resolveCitations } from "@/features/ask/citation-resolver";
-import { composeExactAnswer } from "@/features/ask/exact-answer";
 import { composeFallbackAnswer } from "@/features/ask/fallback-answer";
 import { createMessage, lastConversationMessages } from "@/features/ask/conversation-store";
 import type { AskMessage } from "@/features/ask/conversation-store";
@@ -26,7 +25,7 @@ import {
 } from "@/features/ask/ask-settings";
 import { llmService, type LLMStatus } from "@/features/ask/llm-service";
 import { checkWebGPUSupport, type WebGPUStatus } from "@/features/ask/webgpu-check";
-import { search } from "@/features/retrieval/search-service";
+import { retrieveAskContext } from "@/features/ask/ask-retrieval";
 import { listVaults } from "@/lib/db/filesage-db";
 import type { VaultRecord } from "@/lib/db/types";
 import { ChatThread } from "@/components/ask/chat-thread";
@@ -161,19 +160,17 @@ export function AskWorkspaceShell() {
     setMessages((current) => [...current, userMessage, assistantMessage]);
 
     try {
-      const results = await search(question, {
-        mode: "hybrid",
-        topK: settings.contextChunks,
+      const retrieval = await retrieveAskContext(question, {
+        maxChunks: settings.contextChunks,
         vaultId: selectedVault === "all" ? undefined : selectedVault,
       });
-      const contextChunks = await buildContextChunks(results, {
-        maxChunks: settings.contextChunks,
-      });
+      const { contextChunks } = retrieval;
       console.info("[ask:ui] retrieval complete", {
         query: question,
         vaultId: selectedVault === "all" ? "all" : selectedVault,
-        results: results.length,
-        snippets: results.reduce((count, result) => count + result.snippets.length, 0),
+        queryPlan: retrieval.queryPlan,
+        searchRuns: retrieval.searchRuns,
+        diagnostics: retrieval.diagnostics,
         contextChunks: contextChunks.length,
         files: contextChunks.map((chunk) => chunk.relativePath),
       });
@@ -190,17 +187,16 @@ export function AskWorkspaceShell() {
         return;
       }
 
-      const exactAnswer = composeExactAnswer(question, contextChunks);
-      if (exactAnswer) {
+      if (retrieval.exactAnswer) {
         console.info("[ask:ui] exact answer", {
           query: question,
-          answer: exactAnswer,
+          answer: retrieval.exactAnswer,
         });
         updateAssistantMessage(assistantMessage.id, {
-          content: exactAnswer,
+          content: retrieval.exactAnswer,
           isStreaming: false,
           contextChunks,
-          citations: resolveCitations(exactAnswer, contextChunks),
+          citations: resolveCitations(retrieval.exactAnswer, contextChunks),
         });
         return;
       }

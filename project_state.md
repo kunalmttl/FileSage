@@ -644,11 +644,13 @@ Later:
 - Search UI: complete.
 - Semantic query embeddings: complete.
 - Hybrid retrieval: complete.
-- Metadata filters and reranking: partial.
+- Ask query planning: complete for deterministic keyword/entity/exact-term planning.
+- Ask multi-mode retrieval: complete for keyword, hybrid, and semantic search runs with chunk dedupe/reranking.
+- Metadata filters and reranking: partial outside Ask mode.
 
 ### Phase 4: Trust and Polish
 
-- Ask mode with citations: implemented, pending browser/vault verification.
+- Ask mode with citations: implemented with local Ollama synthesis, source panel evidence, and exact-answer bypasses for identifier lookups.
 - Rename/move approval flow.
 - Undo/action log.
 - Duplicate detection.

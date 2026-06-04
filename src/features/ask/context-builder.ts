@@ -19,6 +19,10 @@ export type ContextChunk = {
   relativePath: string;
   text: string;
   score: number;
+  matchedTerms?: string[];
+  retrievalModes?: string[];
+  searchQueries?: string[];
+  reasons?: string[];
 };
 
 export async function buildContextChunks(
