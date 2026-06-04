@@ -1,6 +1,6 @@
 # FileSage Project State
 
-Last updated: 2026-05-08 (performance optimization and incremental indexing implemented)
+Last updated: 2026-05-30 (`/ask` provider selector and Ollama/API routes added)
 
 ## Current Status
 
@@ -14,6 +14,7 @@ Full local indexing pipeline is operational with performance instrumentation, op
 - Local vector persistence in IndexedDB.
 - File metadata browser.
 - Hybrid retrieval and Search UI.
+- Local `/ask` RAG chat UI using existing hybrid retrieval plus a tiered answer-provider layer: Ollama local, WebLLM/WebGPU, Wllama/CPU, and optional OpenAI-compatible BYOK API.
 - **Pipeline performance instrumentation**: scan, extraction (text/PDF), embedding, and IndexedDB writes are now timed and visible in Settings.
 - **Search hot path optimized**: snippet chunk loading now fetches only top fused chunk IDs instead of loading whole vault chunk sets.
 - **IndexedDB write path optimized**: chunks/vectors/files use relaxed durability; chunks and postings are sub-batched.
@@ -29,6 +30,17 @@ Recent performance verification:
 - Embedding batches: 48-73s batches -> 6-11s progress ticks with smaller batch size.
 - Chunk writes: no current budget warnings after 50-record sub-batching.
 - Incremental rescan: unchanged files are skipped instead of re-extracted and re-embedded.
+
+Ask mode implemented:
+
+- `src/app/api/ask/ollama/*`: local Ollama health and streaming chat route handlers. These proxy only the selected retrieved context chunks and question to `localhost:11434`.
+- `src/app/api/ask/openai-compatible/*`: optional BYOK OpenAI-compatible streaming route handler for providers such as OpenRouter. This is opt-in because retrieved chunks leave the device.
+- `src/workers/llm.worker.ts`: Browser-model worker with HuggingFace GGUF Wllama loading, browser caching, load progress, streaming chat completions, and interrupt support. Wllama is forced to CPU-only execution with `n_gpu_layers: 0`; WebLLM remains available only as the experimental WebGPU engine.
+- `src/features/ask/llm-service.ts`: main-thread provider wrapper for Ollama, WebLLM, Wllama, and OpenAI-compatible streaming requests with debug logging.
+- `src/features/ask/context-builder.ts`: loads full chunk text from returned search chunk IDs, packs numbered context, and builds grounded citation prompts.
+- `src/features/ask/citation-resolver.ts`: parses `[N]` markers and maps citations back to retrieved chunks.
+- `src/components/ask/*`: chat thread, input bar, model status, source panel, citation chips, and suggested prompts.
+- `src/components/settings/settings-workspace-shell.tsx`: local Ask settings persisted in `localStorage`, including provider, model, context, max response, temperature, and optional API endpoint/key.
 
 Search bug fixes applied:
 
@@ -128,8 +140,9 @@ Performance optimization implemented:
 - App shell with persistent left sidebar: Home, Organize, Search, Ask, Settings.
 - Home dashboard with vault connection, pipeline status, readiness, file browser, safety status.
 - `/search`: functional keyword search UI with query input, filters, results, snippets, and detail panel.
+- `/ask`: local RAG chat over indexed files with retrieved source panel, streaming answers, citation chips, provider status, and vault scoping.
 - `/settings`: Performance debug card showing both Search and Pipeline timings with metadata display.
-- `/organize`, `/ask`: placeholder shells.
+- `/organize`: placeholder shell.
 
 ## Immediate Next Steps
 
@@ -138,8 +151,9 @@ Performance optimization implemented:
 3. ~~Add incremental indexing (file fingerprinting) to stop full rebuilds.~~ Complete
 4. ~~Add query embedding path for semantic/vector retrieval.~~ Complete
 5. ~~Add true hybrid fusion after semantic query vectors are available.~~ Complete
-6. Build grounded `/ask` on top of the now-fast hybrid retrieval path.
-7. Begin deeper worker orchestration optimization.
+6. ~~Build grounded `/ask` on top of the now-fast hybrid retrieval path.~~ Complete
+7. Verify `/ask` Ollama generation end to end after `gemma3:1b` finishes downloading locally.
+8. Begin deeper worker orchestration optimization.
 
 ## Performance Issues Identified
 
@@ -585,9 +599,9 @@ Priority: medium/advanced.
 
 Immediate:
 
-1. Build grounded `/ask` with citations on top of hybrid retrieval.
-2. Add answer composition over retrieved snippets.
-3. Add source/citation UX and retrieval confidence display.
+1. Verify `/ask` end to end in a WebGPU-capable browser with an indexed vault.
+2. Tune Ask prompt/context packing against real vault questions.
+3. Add richer markdown rendering only if plain rendering proves insufficient.
 
 Next:
 
@@ -634,7 +648,7 @@ Later:
 
 ### Phase 4: Trust and Polish
 
-- Ask mode with citations: next priority.
+- Ask mode with citations: implemented, pending browser/vault verification.
 - Rename/move approval flow.
 - Undo/action log.
 - Duplicate detection.

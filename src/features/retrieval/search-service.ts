@@ -14,9 +14,11 @@
 import {
   getChunkStats,
   getChunksByIds,
+  listAllChunks,
   getPostingsForTerms,
   getTermStats,
   getVaultStat,
+  listChunksForVault,
   listAllFiles,
   listFilesForVault,
   listVaults,
@@ -205,7 +207,39 @@ export async function search(
   counts.fusedHits = fused.length;
   mark("fusion");
 
+  let exactFallbackChecked = false;
+  if ((mode === "keyword" || mode === "hybrid") && /\d/.test(query)) {
+    exactFallbackChecked = true;
+    const exactResults = await exactChunkFallbackSearch(query, {
+      vaultIds,
+      fileMap,
+      allowedFileIds,
+      topK,
+    });
+    counts.exactFallbackResults = exactResults.length;
+    mark("exactFallback");
+    if (exactResults.length) {
+      finish(exactResults.length);
+      return exactResults;
+    }
+  }
+
   if (!fused.length) {
+    const exactResults =
+      !exactFallbackChecked && (mode === "keyword" || mode === "hybrid")
+        ? await exactChunkFallbackSearch(query, {
+            vaultIds,
+            fileMap,
+            allowedFileIds,
+            topK,
+          })
+        : [];
+    counts.exactFallbackResults = exactResults.length;
+    mark("exactFallback");
+    if (exactResults.length) {
+      finish(exactResults.length);
+      return exactResults;
+    }
     finish(0);
     return [];
   }
@@ -318,4 +352,78 @@ function nowMs(): number {
 
 function roundMs(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+async function exactChunkFallbackSearch(
+  query: string,
+  {
+    vaultIds,
+    fileMap,
+    allowedFileIds,
+    topK,
+  }: {
+    vaultIds: string[];
+    fileMap: Map<string, FileEntryRecord>;
+    allowedFileIds?: Set<string>;
+    topK: number;
+  }
+): Promise<SearchResult[]> {
+  const terms = tokenize(query);
+  const needle = normalizeExactQuery(query);
+  const matchTerms = terms.length ? terms : needle ? [needle] : [];
+  if (!needle && !matchTerms.length) return [];
+
+  const chunks =
+    vaultIds.length === 1
+      ? await listChunksForVault(vaultIds[0]!)
+      : await listAllChunks();
+
+  const fileGroups = new Map<
+    string,
+    { score: number; snippets: SearchResult["snippets"]; matchedTerms: Set<string> }
+  >();
+
+  for (const chunk of chunks) {
+    if (allowedFileIds && !allowedFileIds.has(chunk.fileId)) continue;
+    const normalizedText = normalizeExactQuery(chunk.text);
+    const matchedTerms = matchTerms.filter((term) => normalizedText.includes(term));
+    const exactMatch = needle && normalizedText.includes(needle);
+    if (!exactMatch && !matchedTerms.length) continue;
+
+    const file = fileMap.get(chunk.fileId);
+    if (!file) continue;
+
+    const group =
+      fileGroups.get(chunk.fileId) ??
+      { score: 0, snippets: [], matchedTerms: new Set<string>() };
+    const termsForSnippet = matchedTerms.length ? matchedTerms : [query.trim()];
+    group.score += exactMatch ? 2 : 1;
+    for (const term of termsForSnippet) group.matchedTerms.add(term);
+    if (group.snippets.length < MAX_SNIPPETS_PER_FILE) {
+      group.snippets.push({
+        ...extractSnippet(chunk.text, termsForSnippet),
+        chunkId: chunk.id,
+      });
+    }
+    fileGroups.set(chunk.fileId, group);
+  }
+
+  return Array.from(fileGroups.entries())
+    .map(([fileId, group]) => {
+      const file = fileMap.get(fileId)!;
+      const matchedTerms = Array.from(group.matchedTerms);
+      return {
+        file,
+        snippets: group.snippets,
+        score: group.score,
+        matchedTerms,
+        reasons: ["Exact text matched"],
+      };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
+
+function normalizeExactQuery(value: string): string {
+  return value.normalize("NFKD").toLowerCase().replace(/[\u0300-\u036f]/g, "");
 }

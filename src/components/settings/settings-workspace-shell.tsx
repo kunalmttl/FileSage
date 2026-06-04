@@ -16,6 +16,21 @@ import {
   listPerformanceMetrics,
 } from "@/lib/performance/metrics";
 import type { PerformanceMetric } from "@/lib/performance/metrics";
+import {
+  ASK_CONTEXT_MAX,
+  ASK_CONTEXT_MIN,
+  ASK_MODEL_OPTIONS,
+  ASK_RESPONSE_MAX,
+  ASK_RESPONSE_MIN,
+  clampAskSettings,
+  DEFAULT_ASK_SETTINGS,
+  getDefaultModelForProvider,
+  getProviderLabel,
+  type AskProvider,
+  loadAskSettings,
+  saveAskSettings,
+  type AskSettings,
+} from "@/features/ask/ask-settings";
 
 const sections = [
   {
@@ -42,6 +57,7 @@ const sections = [
 
 export function SettingsWorkspaceShell() {
   const [metrics, setMetrics] = useState<PerformanceMetric[]>([]);
+  const [askSettings, setAskSettings] = useState<AskSettings>(DEFAULT_ASK_SETTINGS);
 
   useEffect(() => {
     const refresh = () => setMetrics(listPerformanceMetrics());
@@ -50,10 +66,31 @@ export function SettingsWorkspaceShell() {
     return () => window.removeEventListener("filesage:performance-metrics", refresh);
   }, []);
 
+  useEffect(() => {
+    const refresh = () => setAskSettings(loadAskSettings());
+    refresh();
+    window.addEventListener("filesage:ask-settings", refresh);
+    return () => window.removeEventListener("filesage:ask-settings", refresh);
+  }, []);
+
   function clearMetrics() {
     clearPerformanceMetrics();
     setMetrics([]);
   }
+
+  function updateAskSettings(patch: Partial<AskSettings>) {
+    const next = clampAskSettings({ ...askSettings, ...patch });
+    setAskSettings(next);
+    saveAskSettings(next);
+  }
+
+  function updateAskProvider(provider: AskProvider) {
+    updateAskSettings({ provider, modelId: getDefaultModelForProvider(provider) });
+  }
+
+  const askModelOptions = ASK_MODEL_OPTIONS.filter(
+    (model) => model.provider === askSettings.provider
+  );
 
   return (
     <div className="space-y-5">
@@ -79,6 +116,127 @@ export function SettingsWorkspaceShell() {
           );
         })}
       </div>
+
+      <Card className="rounded-3xl shadow-none">
+        <CardHeader>
+          <CardTitle>Ask settings</CardTitle>
+          <CardDescription>
+            Answer provider and prompt controls for grounded answers.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-1.5 text-sm">
+            <span className="font-medium">Provider</span>
+            <select
+              value={askSettings.provider}
+              onChange={(event) => updateAskProvider(event.target.value as AskProvider)}
+              className="h-10 w-full rounded-xl border bg-background px-3"
+            >
+              <option value="ollama">Ollama local</option>
+              <option value="webllm">Browser WebGPU</option>
+              <option value="wllama">Browser CPU</option>
+              <option value="openai">OpenAI-compatible API</option>
+            </select>
+            <span className="block text-xs text-muted-foreground">
+              {getProviderLabel(askSettings.provider)}
+            </span>
+          </label>
+
+          <label className="space-y-1.5 text-sm">
+            <span className="font-medium">Model</span>
+            <select
+              value={askSettings.modelId}
+              onChange={(event) => updateAskSettings({ modelId: event.target.value })}
+              className="h-10 w-full rounded-xl border bg-background px-3"
+            >
+              {askModelOptions.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="space-y-1.5 text-sm">
+            <span className="font-medium">Context chunks</span>
+            <input
+              type="range"
+              min={ASK_CONTEXT_MIN}
+              max={ASK_CONTEXT_MAX}
+              value={askSettings.contextChunks}
+              onChange={(event) =>
+                updateAskSettings({ contextChunks: Number(event.target.value) })
+              }
+              className="w-full"
+            />
+            <span className="block text-xs text-muted-foreground">
+              {askSettings.contextChunks} chunks
+            </span>
+          </label>
+
+          <label className="space-y-1.5 text-sm">
+            <span className="font-medium">Max response tokens</span>
+            <input
+              type="number"
+              min={ASK_RESPONSE_MIN}
+              max={ASK_RESPONSE_MAX}
+              step={128}
+              value={askSettings.maxResponseTokens}
+              onChange={(event) =>
+                updateAskSettings({ maxResponseTokens: Number(event.target.value) })
+              }
+              className="h-10 w-full rounded-xl border bg-background px-3"
+            />
+          </label>
+
+          <label className="space-y-1.5 text-sm">
+            <span className="font-medium">Temperature</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.1}
+              value={askSettings.temperature}
+              onChange={(event) =>
+                updateAskSettings({ temperature: Number(event.target.value) })
+              }
+              className="h-10 w-full rounded-xl border bg-background px-3"
+            />
+          </label>
+
+          {askSettings.provider === "openai" ? (
+            <>
+              <label className="space-y-1.5 text-sm">
+                <span className="font-medium">API base URL</span>
+                <input
+                  value={askSettings.openaiBaseUrl}
+                  onChange={(event) =>
+                    updateAskSettings({ openaiBaseUrl: event.target.value })
+                  }
+                  className="h-10 w-full rounded-xl border bg-background px-3"
+                  placeholder="https://openrouter.ai/api/v1"
+                />
+              </label>
+
+              <label className="space-y-1.5 text-sm">
+                <span className="font-medium">API key</span>
+                <input
+                  type="password"
+                  value={askSettings.openaiApiKey}
+                  onChange={(event) =>
+                    updateAskSettings({ openaiApiKey: event.target.value })
+                  }
+                  className="h-10 w-full rounded-xl border bg-background px-3"
+                  placeholder="Stored in this browser"
+                />
+                <span className="block text-xs text-muted-foreground">
+                  Only selected retrieved chunks are sent when this provider is active.
+                </span>
+              </label>
+            </>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <Card className="rounded-3xl shadow-none">
         <CardHeader className="flex flex-row items-start justify-between gap-4">

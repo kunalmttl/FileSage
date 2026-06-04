@@ -21,6 +21,7 @@ const MAX_TOKEN_LENGTH = 64;
  * - Splits on non-alphanumeric characters
  * - Drops stop words and very short/long tokens
  * - Preserves file-extension-like tokens (e.g. "tsx", "json")
+ * - Preserves numeric identifiers (IDs, invoice numbers, Aadhaar fragments, dates)
  */
 export function tokenize(text: string): string[] {
   const normalized = text
@@ -45,8 +46,7 @@ export function tokenize(text: string): string[] {
       if (
         token.length >= MIN_TOKEN_LENGTH &&
         token.length <= MAX_TOKEN_LENGTH &&
-        !STOP_WORDS.has(token) &&
-        !/^\d+$/.test(token) // skip pure numbers
+        !STOP_WORDS.has(token)
       ) {
         tokens.push(token);
       }
