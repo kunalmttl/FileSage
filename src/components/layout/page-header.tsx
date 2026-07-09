@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { Badge } from "@/components/ui/badge";
 
 export function PageHeader({
   eyebrow,
@@ -13,25 +12,32 @@ export function PageHeader({
   action?: ReactNode;
 }) {
   return (
-    <header className="flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-end sm:justify-between">
-      <div className="max-w-3xl space-y-3">
-        {eyebrow ? (
-          <Badge className="rounded-full" variant="outline">
-            {eyebrow}
-          </Badge>
-        ) : null}
-        <div className="space-y-2">
-          <h1 className="text-3xl font-semibold tracking-normal text-balance sm:text-4xl">
-            {title}
-          </h1>
-          {description ? (
-            <p className="max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">
-              {description}
-            </p>
-          ) : null}
-        </div>
+    <header className="flex flex-col gap-4 mb-8 sm:flex-row sm:items-end sm:justify-between">
+      <div className="max-w-2xl space-y-2">
+        {eyebrow && (
+          <p className="eyebrow">{eyebrow}</p>
+        )}
+        <h1
+          className="text-4xl tracking-tight"
+          style={{
+            fontFamily: "Lufga, sans-serif",
+            fontWeight: 500,
+            color: "#222527",
+            letterSpacing: "-0.02em",
+          }}
+        >
+          {title}
+        </h1>
+        {description && (
+          <p
+            className="text-sm leading-6 max-w-xl"
+            style={{ color: "#7A8580" }}
+          >
+            {description}
+          </p>
+        )}
       </div>
-      {action ? <div className="shrink-0">{action}</div> : null}
+      {action && <div className="shrink-0">{action}</div>}
     </header>
   );
 }

@@ -1,12 +1,14 @@
 # FileSage Project State
 
-Last updated: 2026-05-30 (`/ask` provider selector and Ollama/API routes added)
+Last updated: 2026-06-25 (Pipeline status integrated in Vault Connection, custom favicon, and flush sidebar)
 
 ## Current Status
 
 Full local indexing pipeline is operational with performance instrumentation, optimized retrieval, and incremental rescans:
 
-- Vault connection through directory picker plus upload fallback.
+- Vault connection card featuring an integrated, real-time indexing pipeline step track (driven dynamically by scanner, classifier, extraction, and embedding stages).
+- Custom FolderOpen sage SVG favicon replacing the generic default icon.
+- Full-height sidebar pinned flush to the viewport's left edge.
 - Recursive file scanning with IndexedDB persistence.
 - Text extraction for 35+ file types plus PDF extraction with PDF.js.
 - Chunking with 1600-character chunks and overlap.
@@ -14,7 +16,7 @@ Full local indexing pipeline is operational with performance instrumentation, op
 - Local vector persistence in IndexedDB.
 - File metadata browser.
 - Hybrid retrieval and Search UI.
-- Local `/ask` RAG chat UI using existing hybrid retrieval plus a tiered answer-provider layer: Ollama local, WebLLM/WebGPU, Wllama/CPU, and optional OpenAI-compatible BYOK API.
+- Local `/ask` RAG chat UI using deterministic query planning, multi-mode retrieval, exact-answer bypasses, and a tiered answer-provider layer: Ollama local, WebLLM/WebGPU, Wllama/CPU, and optional OpenAI-compatible BYOK API.
 - **Pipeline performance instrumentation**: scan, extraction (text/PDF), embedding, and IndexedDB writes are now timed and visible in Settings.
 - **Search hot path optimized**: snippet chunk loading now fetches only top fused chunk IDs instead of loading whole vault chunk sets.
 - **IndexedDB write path optimized**: chunks/vectors/files use relaxed durability; chunks and postings are sub-batched.
@@ -37,10 +39,14 @@ Ask mode implemented:
 - `src/app/api/ask/openai-compatible/*`: optional BYOK OpenAI-compatible streaming route handler for providers such as OpenRouter. This is opt-in because retrieved chunks leave the device.
 - `src/workers/llm.worker.ts`: Browser-model worker with HuggingFace GGUF Wllama loading, browser caching, load progress, streaming chat completions, and interrupt support. Wllama is forced to CPU-only execution with `n_gpu_layers: 0`; WebLLM remains available only as the experimental WebGPU engine.
 - `src/features/ask/llm-service.ts`: main-thread provider wrapper for Ollama, WebLLM, Wllama, and OpenAI-compatible streaming requests with debug logging.
+- `src/features/ask/query-planner.ts`: deterministic planner that classifies intent and extracts keywords, entities, exact terms, document hints, and multiple retrieval queries.
+- `src/features/ask/ask-retrieval.ts`: client-side retrieval orchestrator that runs keyword, hybrid, and semantic searches, dedupes by chunk ID, reranks chunks, loads full chunk text, and returns diagnostics.
 - `src/features/ask/context-builder.ts`: loads full chunk text from returned search chunk IDs, packs numbered context, and builds grounded citation prompts.
+- `src/features/ask/exact-answer.ts`: deterministic exact-answer bypasses for Aadhaar/UIDAI, phone/mobile, dates, and roll/application-style lookups before calling the LLM.
 - `src/features/ask/citation-resolver.ts`: parses `[N]` markers and maps citations back to retrieved chunks.
-- `src/components/ask/*`: chat thread, input bar, model status, source panel, citation chips, and suggested prompts.
+- `src/components/ask/*`: chat thread, input bar, model status, source panel with retrieval mode/matched-term badges, citation chips, and suggested prompts.
 - `src/components/settings/settings-workspace-shell.tsx`: local Ask settings persisted in `localStorage`, including provider, model, context, max response, temperature, and optional API endpoint/key.
+- Confirmed: Ollama `gemma3:1b` is installed locally and works through the FileSage `/ask` application.
 
 Search bug fixes applied:
 
@@ -137,8 +143,8 @@ Performance optimization implemented:
 
 ### UI
 
-- App shell with persistent left sidebar: Home, Organize, Search, Ask, Settings.
-- Home dashboard with vault connection, pipeline status, readiness, file browser, safety status.
+- App shell with viewport-pinned left sidebar: Home, Organize, Search, Ask, Settings.
+- Home dashboard with vault connection card (featuring the integrated, live indexing pipeline), system readiness stack, file browser, and safety status.
 - `/search`: functional keyword search UI with query input, filters, results, snippets, and detail panel.
 - `/ask`: local RAG chat over indexed files with retrieved source panel, streaming answers, citation chips, provider status, and vault scoping.
 - `/settings`: Performance debug card showing both Search and Pipeline timings with metadata display.
@@ -152,8 +158,9 @@ Performance optimization implemented:
 4. ~~Add query embedding path for semantic/vector retrieval.~~ Complete
 5. ~~Add true hybrid fusion after semantic query vectors are available.~~ Complete
 6. ~~Build grounded `/ask` on top of the now-fast hybrid retrieval path.~~ Complete
-7. Verify `/ask` Ollama generation end to end after `gemma3:1b` finishes downloading locally.
-8. Begin deeper worker orchestration optimization.
+7. Verify `/ask` Ollama generation end to end after `gemma3:1b` finishes downloading locally. ✅ Verified working
+8. ~~Add deterministic query planning and multi-mode ask retrieval before final answer synthesis.~~ Complete
+9. Begin deeper worker orchestration optimization.
 
 ## Performance Issues Identified
 
@@ -599,8 +606,8 @@ Priority: medium/advanced.
 
 Immediate:
 
-1. Verify `/ask` end to end in a WebGPU-capable browser with an indexed vault.
-2. Tune Ask prompt/context packing against real vault questions.
+1. Continue testing `/ask` against real indexed-vault questions and inspect `[ask:retrieval]` diagnostics for poor matches.
+2. Tune Ask prompt/context packing and reranking weights against real vault questions.
 3. Add richer markdown rendering only if plain rendering proves insufficient.
 
 Next:

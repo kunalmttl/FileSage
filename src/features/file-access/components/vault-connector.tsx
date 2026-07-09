@@ -53,6 +53,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { PipelineStatus } from "@/components/shared/pipeline-status";
+import { ReadinessCard } from "@/components/shared/readiness-card";
 
 type ConnectorStatus =
   | "idle"
@@ -98,6 +100,7 @@ export function VaultConnector() {
   const [embedProgress, setEmbedProgress] = useState<EmbedProgress>(EMPTY_EMBED);
   const [classification, setClassification] =
     useState<ClassificationSummary>(EMPTY_CLASSIFICATION);
+  const [totalFilesToProcess, setTotalFilesToProcess] = useState(0);
   const [message, setMessage] = useState("No vault connected yet.");
   const [error, setError] = useState<string | undefined>();
   const [isPending, startTransition] = useTransition();
@@ -161,6 +164,7 @@ export function VaultConnector() {
     setExtractionProgress(EMPTY_EXTRACTION);
     setEmbedProgress(EMPTY_EMBED);
     setClassification(EMPTY_CLASSIFICATION);
+    setTotalFilesToProcess(0);
     setMessage("Waiting for folder selection.");
     try {
       const picked = await pickDirectoryVault();
@@ -187,6 +191,7 @@ export function VaultConnector() {
         onBatch: async (batch) => { scannedFiles.push(...batch); await saveFileBatch(batch); },
       });
       await updateVaultScanStats(vault.id, result.stats);
+      setTotalFilesToProcess(scannedFiles.length);
       const extraction = await runExtraction(scannedFiles, vault.name);
       const embed = await runEmbedding(vault.id, vault.name, scannedFiles.map((file) => file.id));
       await refreshVaults();
@@ -213,6 +218,7 @@ export function VaultConnector() {
     setExtractionProgress(EMPTY_EXTRACTION);
     setEmbedProgress(EMPTY_EMBED);
     setClassification(EMPTY_CLASSIFICATION);
+    setTotalFilesToProcess(0);
     try {
       const vault = createUploadFallbackVault(fileList);
       await saveVault(vault);
@@ -228,6 +234,7 @@ export function VaultConnector() {
         onBatch: saveFileBatch,
       });
       await updateVaultScanStats(vault.id, result.stats);
+      setTotalFilesToProcess(result.files.length);
       const extraction = await runExtraction(result.files, vault.name);
       const embed = await runEmbedding(vault.id, vault.name, result.files.map((file) => file.id));
       await refreshVaults();
@@ -261,6 +268,7 @@ export function VaultConnector() {
     setExtractionProgress(EMPTY_EXTRACTION);
     setEmbedProgress(EMPTY_EMBED);
     setClassification(EMPTY_CLASSIFICATION);
+    setTotalFilesToProcess(0);
     try {
       const perm = await requestDirectoryReadPermission(vault.handle);
       if (perm !== "granted") {
@@ -313,6 +321,7 @@ export function VaultConnector() {
       }
 
       await saveFileBatch(filesToProcess);
+      setTotalFilesToProcess(filesToProcess.length);
       const extraction = await runExtraction(filesToProcess, v.name);
       const embed = await runEmbedding(v.id, v.name, filesToProcess.map((file) => file.id));
       await refreshVaults();
@@ -328,8 +337,28 @@ export function VaultConnector() {
 
   const busy = ["scanning", "classifying", "cleaning", "extracting", "embedding"].includes(status) || isPending;
 
+  const activePipelineStage = (() => {
+    if (status === "scanning") return "Scanning";
+    if (status === "classifying" || status === "cleaning") return "Scanning";
+    if (status === "extracting") {
+      if (totalFilesToProcess <= 0) return "Extracting";
+      const ratio = extractionProgress.processed / totalFilesToProcess;
+      if (ratio < 0.4) return "Extracting";
+      if (ratio < 0.7) return "OCR";
+      return "Chunking";
+    }
+    if (status === "embedding") {
+      if (embedProgress.stage === "loading") return "Embedding";
+      if (embedProgress.processed < embedProgress.total) return "Embedding";
+      return "Indexed";
+    }
+    if (status === "complete") return "Ready";
+    if (status === "idle" && vaults.length > 0) return "Ready";
+    return "Scanning";
+  })();
+
   return (
-    <section className="grid gap-5 lg:grid-cols-[1fr_380px]">
+    <section className="grid gap-5 lg:grid-cols-[1fr_380px] items-start">
       <Card className="rounded-3xl shadow-none">
         <CardHeader>
           <div className="mb-2 flex size-11 items-center justify-center rounded-2xl bg-accent text-accent-foreground">
@@ -421,6 +450,12 @@ export function VaultConnector() {
             </div>
           )}
 
+          {/* Indexing pipeline step track */}
+          <div className="rounded-2xl border bg-card/40 p-4">
+            <p className="text-xs font-medium text-muted-foreground mb-3">Indexing Pipeline</p>
+            <PipelineStatus bare activeStage={activePipelineStage} />
+          </div>
+
           <div className="rounded-2xl border bg-secondary/60 p-4">
             <div className="flex items-start gap-3">
               <Database className="mt-0.5 size-4 shrink-0" />
@@ -440,42 +475,45 @@ export function VaultConnector() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-3xl shadow-none">
-        <CardHeader>
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <CardTitle>Connected vaults</CardTitle>
-              <CardDescription>Saved locally in this browser.</CardDescription>
-            </div>
-            <Button
-              size="icon"
-              variant="outline"
-              disabled={busy}
-              onClick={() => { void refreshVaults(); }}
-              aria-label="Refresh vaults"
-            >
-              <RefreshCw className="size-4" />
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {vaults.length === 0 ? (
-            <div className="rounded-2xl border border-dashed p-5 text-sm text-muted-foreground">
-              No vault metadata is stored yet.
-            </div>
-          ) : (
-            vaults.map((vault) => (
-              <VaultRow
-                key={vault.id}
-                vault={vault}
+      <div className="space-y-5 w-full">
+        <Card className="rounded-3xl shadow-none">
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle>Connected vaults</CardTitle>
+                <CardDescription>Saved locally in this browser.</CardDescription>
+              </div>
+              <Button
+                size="icon"
+                variant="outline"
                 disabled={busy}
-                onRescan={() => { void rescanVault(vault); }}
-                onRemove={() => { void removeVault(vault); }}
-              />
-            ))
-          )}
-        </CardContent>
-      </Card>
+                onClick={() => { void refreshVaults(); }}
+                aria-label="Refresh vaults"
+              >
+                <RefreshCw className="size-4" />
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {vaults.length === 0 ? (
+              <div className="rounded-2xl border border-dashed p-5 text-sm text-muted-foreground">
+                No vault metadata is stored yet.
+              </div>
+            ) : (
+              vaults.map((vault) => (
+                <VaultRow
+                  key={vault.id}
+                  vault={vault}
+                  disabled={busy}
+                  onRescan={() => { void rescanVault(vault); }}
+                  onRemove={() => { void removeVault(vault); }}
+                />
+              ))
+            )}
+          </CardContent>
+        </Card>
+        <ReadinessCard />
+      </div>
     </section>
   );
 }
